@@ -28,14 +28,14 @@ ASCENDC_EXTERN_C ge::graphStatus TilingWyReprBwdFull(gert::TilingContext* contex
     context->SetTilingKey(1);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     auto sysWorkspaceSize = ascendcPlatform.GetLibApiWorkSpaceSize();
-    size_t userWorkspaceSize = B * T * H * V;
+    size_t userWorkspaceSize = B * T * H * V * 2;
     // auto baseM = tiling.mmTilingData.get_baseM();
     // auto baseN = tiling.mmTilingData.get_baseN();
     // uint32_t userWorkspaceSize = baseM * baseN * FP32_DATATYPE_SIZE * aicNum * AIC_AIV_RATION;
     size_t* workspaces = context->GetWorkspaceSizes(1);
     workspaces[0] = static_cast<size_t>(sysWorkspaceSize + userWorkspaceSize);
     const int64_t aicNum = ascendcPlatform.GetCoreNumAic();
-    context->SetBlockDim(1);
+    context->SetBlockDim(aicNum);
     return ge::GRAPH_SUCCESS;
 }
 
