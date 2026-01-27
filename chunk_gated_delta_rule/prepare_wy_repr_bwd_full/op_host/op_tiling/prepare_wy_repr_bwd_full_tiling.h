@@ -24,7 +24,14 @@
 namespace optiling {
 
 BEGIN_TILING_DATA_DEF(PrepareWyReprBwdFullilingData)
-TILING_DATA_FIELD_DEF(uint64_t, sp);            // lse和go的tensor个数
+TILING_DATA_FIELD_DEF(uint64_t, B);
+TILING_DATA_FIELD_DEF(uint64_t, H);
+TILING_DATA_FIELD_DEF(uint64_t, T);
+TILING_DATA_FIELD_DEF(uint64_t, K);
+TILING_DATA_FIELD_DEF(uint64_t, V);
+TILING_DATA_FIELD_DEF(uint64_t, BT);
+TILING_DATA_FIELD_DEF(uint64_t, dkVecRow); //计算dk流程时vector单次处理的行数
+TILING_DATA_FIELD_DEF(uint64_t, dkbVecRow); //dkb计算流程时vector单次处理的行数
 END_TILING_DATA_DEF;
 REGISTER_TILING_DATA_CLASS(PrepareWyReprBwdFull, PrepareWyReprBwdFullilingData)
 

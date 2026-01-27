@@ -24,7 +24,7 @@ namespace GROUPED_MATMUL {
 */
 constexpr int32_t PIPELINE_NUM = 4;
 constexpr uint32_t BROADCAST_DIM = 2;
-constexpr uint32_t FP32_PER_REPEAT = 64;
+constexpr uint32_t FP32_PER_REPEAT_64 = 64;
 
 /** @brief intenal computation class
 */
@@ -292,14 +292,14 @@ __aicore__ inline void GMMQuantMixCoreCompute<mmType, sync>::ComputeDequantAndAc
 template <typename mmType, bool sync>
 __aicore__ inline void GMMQuantMixCoreCompute<mmType, sync>::PerTokenQuant(uint32_t curVecBaseM, uint32_t alignBaseN)
 {
-    uint32_t tailNum = alignBaseN % FP32_PER_REPEAT;
+    uint32_t tailNum = alignBaseN % FP32_PER_REPEAT_64;
     uint8_t repeatStride = alignBaseN * sizeof(float) / UB_BLOCK_UNIT_SIZE;
     uint64_t perchannelResOffset = 0;
     uint64_t alignedN = alignBaseN - tailNum;
     while (perchannelResOffset < alignedN) {
         Mul(mulsResultLocal[perchannelResOffset], dequantMiddleResult[perchannelResOffset], pertokenBrcbLocal,
-            FP32_PER_REPEAT, curVecBaseM, {1, 1, 0, repeatStride, repeatStride, 1});
-        perchannelResOffset += FP32_PER_REPEAT;
+            FP32_PER_REPEAT_64, curVecBaseM, {1, 1, 0, repeatStride, repeatStride, 1});
+        perchannelResOffset += FP32_PER_REPEAT_64;
     }
     if (tailNum != 0) {
         Mul(mulsResultLocal[perchannelResOffset], dequantMiddleResult[perchannelResOffset], pertokenBrcbLocal, tailNum,

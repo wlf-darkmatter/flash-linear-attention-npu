@@ -56,6 +56,22 @@ void PrintOutResult(std::vector<int64_t> &shape, void **deviceAddr) {
   }
 }
 
+void PrintOutResultFp32(std::vector<int64_t> &shape, void **deviceAddr) {
+  auto size = GetShapeSize(shape);
+  std::vector<float> resultData(size, 0);
+  // std::cout << size << std::endl;
+  auto ret = aclrtMemcpy(
+      resultData.data(), resultData.size() * sizeof(resultData[0]), *deviceAddr,
+      size * sizeof(resultData[0]), ACL_MEMCPY_DEVICE_TO_HOST);
+  CHECK_RET(
+      ret == ACL_SUCCESS,
+      LOG_PRINT("copy result from device to host failed. ERROR: %d\n", ret);
+      return );
+  for (int64_t i = 0; i < size; i++) {
+    LOG_PRINT("result[%ld] is: %f\n", i, resultData[i]);
+  }
+}
+
 int Init(int32_t deviceId, aclrtStream *stream) {
   // 固定写法，资源初始化
   auto ret = aclInit(nullptr);
@@ -193,17 +209,17 @@ int main() {
   int64_t lenA = B * H * T * BT;
   std::vector<uint16_t> kHostData(lenK, 0x3C00); // 1.0 的 half 表示
   std::vector<uint16_t> vHostData(lenV, 0x3C00);
-  std::vector<uint16_t> betaHostData(lenBeta, 16384);
+  std::vector<float> betaHostData(lenBeta, 1.0f);
   std::vector<uint16_t> AHostData(lenA, 0x3C00);
   std::vector<uint16_t> dAHostData(lenA, 0x3C00);
   std::vector<uint16_t> dwHostData(lenK, 0x3C00);
   std::vector<uint16_t> duHostData(lenV, 0x3C00);
-  std::vector<uint16_t> gHostData(lenBeta, 0x3C00);
+  std::vector<float> gHostData(lenBeta, 1.0f);
 
   std::vector<uint16_t> dkHostData(lenK, 0x3C00);
   std::vector<uint16_t> dvHostData(lenV, 0x3C00);
-  std::vector<uint16_t> dbetaHostData(lenBeta, 0x3C00);
-  std::vector<uint16_t> dgHostData(lenBeta, 0x3C00);
+  std::vector<float> dbetaHostData(lenBeta, 1.0f);
+  std::vector<float> dgHostData(lenBeta, 1.0f);
   // for(int64_t Indices:chunkIndicesHostData){
   //   std::cout<< Indices << std::endl;
   // }
@@ -211,7 +227,7 @@ int main() {
   CHECK_RET(ret == ACL_SUCCESS, return ret);
   ret = CreateAclTensor(vHostData, vShape, &vDeviceAddr, aclDataType::ACL_FLOAT16, &v);
   CHECK_RET(ret == ACL_SUCCESS, return ret);
-  ret = CreateAclTensor(betaHostData, betaShape, &betaDeviceAddr, aclDataType::ACL_FLOAT16, &beta);
+  ret = CreateAclTensor(betaHostData, betaShape, &betaDeviceAddr, aclDataType::ACL_FLOAT, &beta);
   CHECK_RET(ret == ACL_SUCCESS, return ret);
   ret = CreateAclTensor(AHostData, AShape, &ADeviceAddr, aclDataType::ACL_FLOAT16, &A);
   CHECK_RET(ret == ACL_SUCCESS, return ret);
@@ -221,15 +237,15 @@ int main() {
   CHECK_RET(ret == ACL_SUCCESS, return ret);
   ret = CreateAclTensor(duHostData, duShape, &duDeviceAddr, aclDataType::ACL_FLOAT16, &du);
   CHECK_RET(ret == ACL_SUCCESS, return ret);
-  ret = CreateAclTensor(gHostData, gShape, &gDeviceAddr, aclDataType::ACL_FLOAT16, &g);
+  ret = CreateAclTensor(gHostData, gShape, &gDeviceAddr, aclDataType::ACL_FLOAT, &g);
   CHECK_RET(ret == ACL_SUCCESS, return ret);
   ret = CreateAclTensor(dkHostData, dkShape, &dkDeviceAddr, aclDataType::ACL_FLOAT16, &dk);
   CHECK_RET(ret == ACL_SUCCESS, return ret);
   ret = CreateAclTensor(dvHostData, dvShape, &dvDeviceAddr, aclDataType::ACL_FLOAT16, &dv);
   CHECK_RET(ret == ACL_SUCCESS, return ret);
-  ret = CreateAclTensor(dbetaHostData, dbetaShape, &dbetaDeviceAddr, aclDataType::ACL_FLOAT16, &dbeta);
+  ret = CreateAclTensor(dbetaHostData, dbetaShape, &dbetaDeviceAddr, aclDataType::ACL_FLOAT, &dbeta);
   CHECK_RET(ret == ACL_SUCCESS, return ret);
-  ret = CreateAclTensor(dgHostData, dgShape, &dgDeviceAddr, aclDataType::ACL_FLOAT16, &dg);
+  ret = CreateAclTensor(dgHostData, dgShape, &dgDeviceAddr, aclDataType::ACL_FLOAT, &dg);
   CHECK_RET(ret == ACL_SUCCESS, return ret);
   // 3. 调用CANN算子库API，需要修改为具体的Api名称
   uint64_t workspaceSize = 0;
@@ -265,6 +281,7 @@ int main() {
 
   // 5.获取输出的值，将device侧内存上的结果拷贝至host侧，需要根据具体API的接口定义修改
   // PrintOutResult(dkShape, &dkDeviceAddr);
+  // PrintOutResultFp32(dbetaShape, &dbetaDeviceAddr);
   // 6. 释放aclTensor和aclScalar，需要根据具体API的接口定义修改
   // aclDestroyTensor(q);
   // aclDestroyTensor(k);

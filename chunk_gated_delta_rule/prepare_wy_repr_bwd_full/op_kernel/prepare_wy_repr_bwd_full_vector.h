@@ -60,6 +60,7 @@ private:
     GlobalTensor<kType> kTensor;
     GlobalTensor<kType> dkTensor;
     GlobalTensor<betaType> betaTensor;
+    GlobalTensor<betaType> dbetaTensor;
     GlobalTensor<kType> workSpaceTensor;
 
     TQue<AscendC::TPosition::VECIN, 1> kInQue;
@@ -76,6 +77,7 @@ private:
     TBuf<AscendC::TPosition::VECCALC> dkbFp32Buf;
     TBuf<AscendC::TPosition::VECCALC> betaFp32Buf;
     TBuf<AscendC::TPosition::VECCALC> betaFp32BrcbBuf;
+    TBuf<AscendC::TPosition::VECCALC> sharedTmpBuf;
 };
 
 template <typename kType, typename betaType>
@@ -100,6 +102,10 @@ template <typename kType, typename betaType>
 __aicore__ void inline PrepareWyReprBwdFullVectorProcess<kType, betaType>::Init(GM_ADDR tiling, AscendC::TPipe *pipe_) {
     pipe = pipe_;
     workSpaceTensor.SetGlobalBuffer((__gm__ kType *)workspace);
+    kTensor.SetGlobalBuffer((__gm__ kType *)k);
+    dkTensor.SetGlobalBuffer((__gm__ kType *)dk);
+    betaTensor.SetGlobalBuffer((__gm__ betaType *)beta);
+    dbetaTensor.SetGlobalBuffer((__gm__ betaType *)dbeta);
     return;
 }
 
@@ -118,16 +124,10 @@ __aicore__ void inline PrepareWyReprBwdFullVectorProcess<kType, betaType>::Proce
     uint32_t coreLoops = B * coreLoopsInB;
     uint32_t coreIdx = GetBlockIdx() / GetSubBlockNum();
     uint32_t coreNumAic = GetBlockNum();
-    uint32_t rowNum = BT;
+    uint32_t rowNum = dkbRowNum;
     uint32_t rowOffset = 0;
-    if(GetSubBlockNum() > 1) {
-        if(GetSubBlockIdx() == 0) {
-            rowNum = rowNum / GetSubBlockNum();
-        } else {
-            rowOffset = rowNum / GetSubBlockNum();
-            rowNum = rowNum - rowOffset;
-        }
-    }
+    uint32_t vecTaskIdx = 0;
+
     //init
     pipe->InitBuffer(kInQue, 2, rowNum * K * sizeof(kType));
     pipe->InitBuffer(betaInQue, 2, rowNum * sizeof(betaType));
@@ -140,14 +140,14 @@ __aicore__ void inline PrepareWyReprBwdFullVectorProcess<kType, betaType>::Proce
     pipe->InitBuffer(kFp32Buf, rowNum * K * sizeof(float32_t));
     pipe->InitBuffer(betaFp32Buf, rowNum * sizeof(float32_t));
     pipe->InitBuffer(betaFp32BrcbBuf, rowNum * ONE_BLOCK_32);
-    kTensor.SetGlobalBuffer((__gm__ kType *)k);
-    dkTensor.SetGlobalBuffer((__gm__ kType *)dk);
-    betaTensor.SetGlobalBuffer((__gm__ betaType *)beta);
+    pipe->InitBuffer(sharedTmpBuf, BT * sizeof(float32_t));
+
     auto tensorDkbFp32 = dkbFp32Buf.Get<float32_t>();
     auto tensorDkFp32 = dkFp32Buf.Get<float32_t>();
     auto tensorKfp32 = kFp32Buf.Get<float32_t>();
     auto tensorBetafp32 = betaFp32Buf.Get<float32_t>();
     auto tensorBetaBrcbfp32 = betaFp32BrcbBuf.Get<float32_t>();
+    auto tensorSharedTmp = sharedTmpBuf.Get<float32_t>();
     //
     // printf("coreIdx:%d, coreNumAic:%d\n",coreIdx, coreNumAic );
     AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(SYNC_AIV_AIC_FLAG_3);
@@ -156,80 +156,108 @@ __aicore__ void inline PrepareWyReprBwdFullVectorProcess<kType, betaType>::Proce
         uint32_t bIdx = loopIdx / coreLoopsInB;
         uint32_t chunkIdx = loopIdx % coreLoopsInB;
         for (int h = 0; h < H; h++) {
-            auto kOffset = ((bIdx * H + h) * T  + chunkIdx * BT + rowOffset) * K;
-            auto betaOffset = (bIdx * H + h) * T  + chunkIdx * BT + rowOffset;
             AscendC::CrossCoreWaitFlag(SYNC_AIC_AIV_FLAG_5);
-            //AscendC::printf("CrossCoreWaitFlag kOffset:%d, betaOffset:%d\n", kOffset, betaOffset);
-            //copyin
-            {
-                // auto tensorKin = kInQue.AllocTensor<kType>();
-                // DataCopy(tensorKin, kTensor[kOffset], K * rowNum);
-                // auto tensorBetain = betaInQue.AllocTensor<betaType>();
-                // DataCopy(tensorBetain, betaTensor[betaOffset], rowNum);
-                // auto tensorDkin = dkInQue.AllocTensor<kType>();
-                // DataCopy(tensorDkin, dkTensor[kOffset], K * rowNum);
-                // auto tensorDkbin = dkbInQue.AllocTensor<betaType>();
-                // DataCopy(tensorDkbin, work[betaOffset], K * rowNum);
+            for(uint32_t rowOffset = 0;rowOffset < BT; rowOffset += rowNum) {
+                ++vecTaskIdx;
+                if (vecTaskIdx % GetSubBlockNum() != GetSubBlockIdx()) {
+                    continue;
+                }
+                auto kOffset = ((bIdx * H + h) * T  + chunkIdx * BT + rowOffset) * K;
+                auto betaOffset = (bIdx * H + h) * T  + chunkIdx * BT + rowOffset;
+                //copyin
+                {
+                    auto tensorDkbin = dkbInQue.AllocTensor<kType>();
+                    DataCopy(tensorDkbin, workSpaceTensor[kOffset], K * rowNum);
+                    auto tensorKin = kInQue.AllocTensor<kType>();
+                    DataCopy(tensorKin, kTensor[kOffset], K * rowNum);
+                    auto tensorBetain = betaInQue.AllocTensor<betaType>();
+                    DataCopy(tensorBetain, betaTensor[betaOffset], rowNum);
+                    auto tensorDkin = dkInQue.AllocTensor<kType>();
+                    DataCopy(tensorDkin, dkTensor[kOffset], K * rowNum);
+                    
+                    dkbInQue.EnQue(tensorDkbin);
+                    kInQue.EnQue(tensorKin);
+                    betaInQue.EnQue(tensorBetain);
+                    dkInQue.EnQue(tensorDkin);
+                    //AscendC::printf("copyin\n");
+                }
+                //compute
+                {
+                    auto tensorDkbin = dkbInQue.DeQue<kType>();
+                    auto tensorKin = kInQue.DeQue<kType>();
+                    auto tensorBetain = betaInQue.DeQue<betaType>();
+                    auto tensorDkin = dkInQue.DeQue<kType>();
 
-                // kInQue.EnQue(tensorKin);
-                // betaInQue.EnQue(tensorBetain);
-                // dkInQue.EnQue(tensorDkin);
-                // dkbInQue.EnQue(tensorDkbin);
-                //AscendC::printf("copyin\n");
-            }
-            //compute
-            {
-                // auto tensorKin = kInQue.DeQue<kType>();
-                // auto tensorBetain = betaInQue.DeQue<betaType>();
-                // auto tensorDkin = dkInQue.DeQue<kType>();
-                // auto tensorDkbin = dkbInQue.DeQue<kType>();
-                // auto tensorDkOut = dkOutQue.AllocTensor<kType>();
-                // auto tensorDbetaOut = dBetaOutQue.AllocTensor<betaType>();
-                // //cast fp32
-                // if constexpr (!std::is_same<betaType, float32_t>()) {
-                //     Cast(tensorBetafp32, tensorBetain, RoundMode::CAST_NONE, rowNum);
-                // } else {
-                //     DataCopy(tensorBetafp32, tensorBetain, rowNum);
-                // }
-                // //AscendC::printf("159\n");
-                // Cast(tensorKfp32, tensorKin, RoundMode::CAST_NONE, K * rowNum);
-                // PipeBarrier<PIPE_V>();
-                // //brcb
-                // Brcb(tensorBetaBrcbfp32, tensorBetafp32, static_cast<uint8_t>(rowNum /8), {1, 8});
-                // // DumpTensor(tensorBetaBrcbfp32, 0,  8 * rowNum);
-                // PipeBarrier<PIPE_V>();
-                // //AscendC::printf("165\n");
-                // //mul
-                // uint64_t perchannelResOffset = 0;
-                // uint8_t repeatStride = K * sizeof(float32_t) / ONE_BLOCK_32;
-                // while (perchannelResOffset < K) {
-                //     Mul(tensorKfp32[perchannelResOffset], tensorKfp32[perchannelResOffset], tensorBetaBrcbfp32,
-                //         FP32_PER_REPEAT, rowNum, {1, 1, 0, repeatStride, repeatStride, 1});
-                //     perchannelResOffset += FP32_PER_REPEAT;
-                // }
-                // // DumpTensor(tensorKfp32, 1,  K * rowNum);
-                // PipeBarrier<PIPE_V>();
-                // Cast(tensorOut, tensorKfp32, RoundMode::CAST_RINT, K * rowNum);
+                    auto tensorDkOut = dkOutQue.AllocTensor<kType>();
+                    auto tensorDbetaOut = dBetaOutQue.AllocTensor<betaType>();
+                    //cast fp32
+                    if constexpr (!std::is_same<betaType, float32_t>()) {
+                        Cast(tensorBetafp32, tensorBetain, RoundMode::CAST_NONE, rowNum);
+                    } else {
+                        DataCopy(tensorBetafp32, tensorBetain, rowNum);
+                    }
+                    Cast(tensorKfp32, tensorKin, RoundMode::CAST_NONE, K * rowNum);
+                    Cast(tensorDkbFp32, tensorDkbin, RoundMode::CAST_NONE, K * rowNum);
+                    Cast(tensorDkFp32, tensorDkin, RoundMode::CAST_NONE, K * rowNum);
+                    PipeBarrier<PIPE_V>();
+                    //brcb
+                    Brcb(tensorBetaBrcbfp32, tensorBetafp32, static_cast<uint8_t>(rowNum /8), {1, 8});
+                    PipeBarrier<PIPE_V>();
+                    //mul
+                    Mul(tensorKfp32, tensorKfp32, tensorDkbFp32, K * rowNum);
+                    PipeBarrier<PIPE_V>();
+                    uint64_t perchannelResOffset = 0;
+                    uint8_t repeatStride = K * sizeof(float32_t) / ONE_BLOCK_32;
+                    while (perchannelResOffset < K) {
+                        Mul(tensorDkbFp32[perchannelResOffset], tensorDkbFp32[perchannelResOffset], tensorBetaBrcbfp32,
+                            FP32_PER_REPEAT_64, rowNum, {1, 1, 0, repeatStride, repeatStride, 1});
+                        perchannelResOffset += FP32_PER_REPEAT_64;
+                    }
+                    // DumpTensor(tensorKfp32, 1,  K * rowNum);
+                    //reducesum
+                    for(uint32_t row = 0;row < rowNum; row++) {
+                        PipeBarrier<PIPE_V>();
+                        ReduceSum(tensorKfp32, tensorKfp32[row * K], tensorSharedTmp,
+                            FP32_PER_REPEAT_64, K / FP32_PER_REPEAT_64, 8);
+                        SetFlag<AscendC::HardEvent::V_S>(0);
+                        WaitFlag<AscendC::HardEvent::V_S>(0);
+                        tensorBetafp32.SetValue(row, tensorKfp32.GetValue(0));
+                    }
+                    // ADD
+                    PipeBarrier<PIPE_V>();
+                    Add(tensorDkFp32, tensorDkFp32, tensorDkbFp32, K * rowNum);
+                    PipeBarrier<PIPE_V>();
+                    // cast
+                    Cast(tensorDkOut, tensorDkFp32, RoundMode::CAST_RINT, K * rowNum);
+                    if constexpr (!std::is_same<betaType, float32_t>()) {
+                        Cast(tensorDbetaOut, tensorBetafp32, RoundMode::CAST_RINT, rowNum);
+                    } else {
+                        DataCopy(tensorDbetaOut, tensorBetafp32, rowNum);
+                    }
 
-                // kInQue.FreeTensor(tensorKin);
-                // betaInQue.FreeTensor(tensorBetain);
-                // kBetaOutQue.EnQue(tensorOut);
-                // AscendC::printf("compute\n");
+                    dkbInQue.FreeTensor(tensorDkbin);
+                    kInQue.FreeTensor(tensorKin);
+                    betaInQue.FreeTensor(tensorBetain);
+                    dkInQue.FreeTensor(tensorDkin);
+                    dkOutQue.EnQue(tensorDkOut);
+                    dBetaOutQue.EnQue(tensorDbetaOut);
+                }
+                //copyout
+                {
+                    auto tensorDkOut = dkOutQue.DeQue<kType>();
+                    auto tensorDbetaOut = dBetaOutQue.DeQue<betaType>();
+                    DataCopy(dkTensor[kOffset], tensorDkOut, K * rowNum);
+                    DataCopy(dbetaTensor[betaOffset], tensorDbetaOut, rowNum);
+                    dkOutQue.FreeTensor(tensorDkOut);
+                    dBetaOutQue.FreeTensor(tensorDbetaOut);
+                }
+                
             }
-            //copyout
-            {
-                // auto tensorOut = kBetaOutQue.DeQue<kType>();
-                // DataCopy(workSpaceTensor[kOffset], tensorOut, K * rowNum);
-                // kBetaOutQue.FreeTensor(tensorOut);
-                // // AscendC::printf("kOffset:%ld, K * rowNum:%d\n", kOffset, K * rowNum);
-            }
+            
             AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(SYNC_AIV_AIC_FLAG_3);
             //AscendC::printf("CrossCoreSetFlag\n");
         }
     }
-    // DumpTensor(workSpaceTensor, 0,  8192);
-    //AscendC::printf("CrossCoreWaitFlag\n");
-    //AscendC::printf("CrossCoreWaitFlag\n");
     return;
 }
 
@@ -309,8 +337,8 @@ __aicore__ void inline PrepareWyReprBwdFullVectorProcess<kType, betaType>::Proce
                 uint8_t repeatStride = K * sizeof(float32_t) / ONE_BLOCK_32;
                 while (perchannelResOffset < K) {
                     Mul(tensorKfp32[perchannelResOffset], tensorKfp32[perchannelResOffset], tensorBetaBrcbfp32,
-                        FP32_PER_REPEAT, rowNum, {1, 1, 0, repeatStride, repeatStride, 1});
-                    perchannelResOffset += FP32_PER_REPEAT;
+                        FP32_PER_REPEAT_64, rowNum, {1, 1, 0, repeatStride, repeatStride, 1});
+                    perchannelResOffset += FP32_PER_REPEAT_64;
                 }
                 // DumpTensor(tensorKfp32, 1,  K * rowNum);
                 PipeBarrier<PIPE_V>();
