@@ -1,6 +1,7 @@
 import torch
 import torch_npu
-
+from typing import Optional
+import math
 
 def prepare_lens(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
     return cu_seqlens[1:] - cu_seqlens[:-1]
@@ -20,25 +21,122 @@ def prepare_chunk_indices(
 
     return torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(cu_seqlens)
 
+def chunk_bwd_dv_local_torch(
+    q: torch.Tensor,  # [B, H, T_max, K]
+    k: torch.Tensor,  # [B, H, T_max, K]
+    do: torch.Tensor, # [B, H, T_max, V]
+    g: torch.Tensor,  # [B, H, T_max]
+    scale: Optional[float],
+    cu_seqlens: torch.LongTensor,  # [batch_size+1]
+    chunk_size: int = 64
+) -> torch.Tensor:
+    B, H, T, K = k.shape
+    V = do.shape[3]
+    if scale is None:
+        scale = 1.0 / math.sqrt(K)
+    if cu_seqlens is not None:
+        batch_idx = 0
+    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
+    chunk_indices = chunk_indices.view(-1)
+    BT = min(chunk_size, max(16, 2 ** math.ceil(math.log2(T)))) # 有风险，T至少要>=64,否则会计算错误
+    # print("T = ",T)
+    # print("BT = ",BT)
+    NT = len(chunk_indices) // 2 
+    dv = torch.zeros_like(do).to(torch.float32)
+    g_t = g
+    for chunk_idx in range(NT):
+        i_n = chunk_indices[chunk_idx * 2].item() # 序列编号
+        i_t = chunk_indices[chunk_idx * 2 + 1].item() # chunk编号
+        bos = cu_seqlens[i_n].item() # [0,2048,4096,...]  当前token 在T中开始的位置
+        eos = cu_seqlens[i_n + 1].item()
+        T = eos - bos
+        chunk_start_token = i_t * chunk_size # 当前chunk在序列内的起始token位置
+        chunk_end_token = min(chunk_start_token + chunk_size, T) # 结束位置，不超过序列真实长度
+        chunk_len = chunk_end_token - chunk_start_token # 当前chunk的有效token数
+        if chunk_len <= 0:
+            continue
+        global_start = bos + chunk_start_token # 当前chunk在T中开始的位置
+        for i_h in range(H):
+            b_A = torch.zeros(BT, BT, device=q.device, dtype=torch.float32)
+            BK = 128  # 与Triton保持一致
+            BK = min(BK, K)  # 确保不超过K
+            for i_k in range(0, K, BK):
+                k_end = min(i_k + BK, K)
+                b_k = k[batch_idx, i_h, global_start:global_start+chunk_len, i_k:k_end].to(torch.float32) # [chunk_len, BK]
+                q_normal = q[batch_idx, i_h, global_start:global_start+chunk_len, i_k:k_end].to(torch.float32)  # [chunk_len, BK]
+                b_q = q_normal.transpose(0, 1)  # [BK, chunk_len]
+                b_A[:chunk_len, :chunk_len] += torch.matmul(b_k, b_q) * scale # [BT,BT]
+            b_g = g_t[batch_idx, i_h, global_start:global_start+chunk_len] # g_t [B, H, T_max] → b_g [chunk_len]
+            o_t = i_t * BT + torch.arange(0, BT) # [BT] chunk内的token序号
+            m_t = o_t < T # [BT] bool掩码：是否是有效token
+            o_t_col = o_t.unsqueeze(1)  # [BT, 1]
+            o_t_row = o_t.unsqueeze(0)  # [1, BT]
+            pos_mask = o_t_col <= o_t_row  # [BT, BT] 上三角矩阵：只允许当前token看<=自己的token（因果掩码）
+            m_t_col = m_t.unsqueeze(1)  # [BT, 1]
+            valid_mask = m_t_col & m_t  #  [BT, BT] 有效掩码：只保留有效token的位置，左上角是[有效token,有效token]大小的全1
+            # 组合掩码
+            m_A = pos_mask & valid_mask  # [BT, BT]
+            g_i = b_g.unsqueeze(1)  # [chunk_len, 1]
+            g_j = b_g.unsqueeze(0)  # [1, chunk_len]
+            g_factor = torch.exp(g_j - g_i)  # [chunk_len, chunk_len]
+            b_A_gated = torch.zeros_like(b_A)
+            b_A_gated[:chunk_len, :chunk_len] = b_A[:chunk_len, :chunk_len] * g_factor # [BT, BT] 门控缩放后的注意力核矩阵
+            # 应用掩码
+            b_A_masked = torch.where(m_A, b_A_gated, torch.zeros_like(b_A_gated)) # 只保留掩码为 True 的位置的 b_A_gated 值，其余置 0
+            b_A_masked = b_A_masked.to(torch.float32) # [BT, BT]
+            BV = 128  # 与Triton保持一致
+            BV = min(BV, V)  # 确保不超过V
+            for i_v in range(0, V, BV):
+                v_end = min(i_v + BV, V)
+                v_width = v_end - i_v
+                b_do = do[batch_idx, i_h, global_start:global_start+chunk_len, i_v:v_end].to(torch.float32) # do [B, T_max, H, V] → b_do [chunk_len, BV]
+                b_dv = torch.matmul(b_A_masked[:chunk_len, :chunk_len], b_do) # b_A_masked 这个 [BT, BT] 的矩阵，只有左上角 [chunk_len, chunk_len] 区域有非 0 值，其余所有区域全是 0
+                dv[batch_idx, i_h, global_start:global_start+chunk_len, i_v:v_end] += b_dv
+    return dv
+
+
+def create_incremental_tensor(shape, dtype=torch.float16, start=1, step=1):
+    total_elements = 1
+    for dim in shape:
+        total_elements *= dim
+    tensor = torch.arange(
+        start, 
+        start + total_elements * step, 
+        step, 
+        dtype=dtype
+    ).reshape(shape)
+    return tensor
+
 if __name__ == "__main__":
     torch.manual_seed(0)
     
-    B, T, H, K, V = 1, 64, 1, 128, 128
+    B, H, T, K, V = 1, 1, 2, 16, 16
     chunk_size=64
     scale = 1.0
 
-    q = torch.randn(B, H, T, K, dtype=torch.float16, requires_grad=True).npu()
-    k = torch.randn(B, H, T, K, dtype=torch.float16, requires_grad=True).npu()
-    w = torch.randn(B, H, T, K, dtype=torch.float16, requires_grad=True).npu()
-    do = torch.randn(B, H, T, V, dtype=torch.float16, requires_grad=True).npu()
-    upper_tri_matrix = (torch.randn(chunk_size, chunk_size) > 0).to(torch.bool).npu()
-    # dv = torch.randn(B, H, T, V, dtype=torch.float16, requires_grad=True).npu()
-    g = torch.randn(B, H, T, dtype=torch.float16, requires_grad=True).npu()
-    cu_seqlens = q.new_tensor([0, 64], dtype=torch.long).npu()
+    q = torch.randn(B, H, T, K, dtype=torch.float16)
+    k = torch.randn(B, H, T, K, dtype=torch.float16)
+    d_o = torch.randn(B, H, T, V, dtype=torch.float16)
+    # g = torch.randn(B, H, T, dtype=torch.float16)
+    g = create_incremental_tensor((B, H, T), dtype=torch.float16)
+    print("g=",g)
+    upper_tri_matrix = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool))
+    cu_seqlens = q.new_tensor([0, 2], dtype=torch.long)
 
     chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
-    chunk_indices = chunk_indices.view(-1).npu()
 
-    dv = torch_npu.npu_chunk_bwd_dv_local(q, k, do, g,upper_tri_matrix=None, g_gamma=None, A=None,cu_seqlens=cu_seqlens, chunk_indices = chunk_indices, scale=scale, chunk_size =chunk_size)
-    # dv = torch_npu.npu_chunk_bwd_dv_local(q, k, do, g,upper_tri_matrix=upper_tri_matrix, g_gamma=g, A=q,cu_seqlens=cu_seqlens, chunk_indices = chunk_indices, scale=scale, chunk_size =chunk_size)
+    q_npu = q.npu()
+    k_npu = k.npu()
+    d_o_npu = d_o.npu()
+    g_npu = g.npu()
+    upper_tri_matrix_npu = upper_tri_matrix.npu()
+    cu_seqlens_npu = cu_seqlens.npu()
+    chunk_indices_npu = chunk_indices.npu()
+
+    dv = torch_npu.npu_chunk_bwd_dv_local(q_npu, k_npu, d_o_npu, g_npu,upper_tri_matrix=None, g_gamma=None, A=None,cu_seqlens=cu_seqlens_npu, chunk_indices = chunk_indices_npu, scale=scale, chunk_size =chunk_size)
+    # dv = torch_npu.npu_chunk_bwd_dv_local(q_npu, k_npu, d_o_npu, g_npu,upper_tri_matrix=upper_tri_matrix_npu, g_gamma=g, A=q,cu_seqlens=cu_seqlens_npu, chunk_indices = chunk_indices_npu, scale=scale, chunk_size =chunk_size)
     print(f"==== dv.shape = {dv.shape} ",dv)
+
+    dv_golden = chunk_bwd_dv_local_torch(q, k, d_o, g, scale, cu_seqlens, chunk_size)
+    print(f"==== dv_golden.shape = {dv_golden.shape} ",dv_golden)
+
