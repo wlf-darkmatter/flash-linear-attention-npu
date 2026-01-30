@@ -32,6 +32,7 @@ static constexpr size_t ATTR_CHUNK_SIZE_IDX = 1;
 static constexpr size_t Q_K_DO_DIM_NUM = 4;
 static constexpr size_t G_DIM_NUM = 3;
 static constexpr size_t TRI_MATRIX_DIM_NUM = 2;
+static constexpr size_t SEQLENS_DIM_NUM = 1;
 
 static constexpr size_t DIM_0 = 0;
 static constexpr size_t DIM_1 = 1;
@@ -41,12 +42,15 @@ static constexpr size_t DIM_3 = 3;
 static constexpr int64_t V_L_B = 1;
 static constexpr int64_t CHUNK_SIZE_64 = 64;
 static constexpr int64_t CHUNK_SIZE_128 = 128;
+static constexpr int64_t CHUNK_INDICES_DIM_1_SIZE = 2;
 
 static constexpr const char *const INPUT_Q_NAME = "q";
 static constexpr const char *const INPUT_K_NAME = "k";
 static constexpr const char *const INPUT_DO_NAME = "do";
 static constexpr const char *const INPUT_G_NAME = "g";
 static constexpr const char *const INPUT_TRI_MATRIX_NAME = "upper_tri_matrix";
+static constexpr const char *const INPUT_CHUNK_INDICES_NAME = "chunk_indices";
+static constexpr const char *const INPUT_SEQLENS_NAME = "cu_seqlens";
 
 class ChunkBwdDvLocalTilingProcessor {
     gert::TilingContext *context_;
@@ -61,7 +65,9 @@ public:
     ge::graphStatus RequiredInputDimNumCheck(const gert::StorageShape *curShape, size_t validDimNum,
                                              const char *inputName)
     {
-        OP_CHECK_IF(curShape == nullptr, OP_LOGE(context_->GetNodeName(), "Input %s is required, but got nullptr.", inputName), return ge::GRAPH_FAILED);
+        OP_CHECK_IF(curShape == nullptr,
+                    OP_LOGE(context_->GetNodeName(), "Input %s is required, but got nullptr.", inputName),
+                    return ge::GRAPH_FAILED);
         const gert::Shape storageShape = curShape->GetStorageShape();
         size_t dimNum = storageShape.GetDimNum();
         OP_CHECK_IF(dimNum != validDimNum,
@@ -74,20 +80,20 @@ public:
 
     ge::graphStatus PreCheck()
     {
-        const ge::char_t *nodeName = context_->GetNodeName();
-        OP_CHECK_IF(RequiredInputDimNumCheck(context_->GetInputShape(INPUT_Q_IDX), Q_K_DO_DIM_NUM, INPUT_Q_NAME) !=
+        OP_CHECK_IF(RequiredInputDimNumCheck(context_->GetOptionalInputShape(INPUT_Q_IDX), Q_K_DO_DIM_NUM,
+                                             INPUT_Q_NAME) != ge::GRAPH_SUCCESS,
+                    , return ge::GRAPH_FAILED);
+        OP_CHECK_IF(RequiredInputDimNumCheck(context_->GetOptionalInputShape(INPUT_K_IDX), Q_K_DO_DIM_NUM,
+                                             INPUT_K_NAME) != ge::GRAPH_SUCCESS,
+                    , return ge::GRAPH_FAILED);
+        OP_CHECK_IF(RequiredInputDimNumCheck(context_->GetOptionalInputShape(INPUT_DO_IDX), Q_K_DO_DIM_NUM,
+                                             INPUT_DO_NAME) != ge::GRAPH_SUCCESS,
+                    , return ge::GRAPH_FAILED);
+        OP_CHECK_IF(RequiredInputDimNumCheck(context_->GetOptionalInputShape(INPUT_G_IDX), G_DIM_NUM, INPUT_G_NAME) !=
                         ge::GRAPH_SUCCESS,
                     , return ge::GRAPH_FAILED);
-        OP_CHECK_IF(RequiredInputDimNumCheck(context_->GetInputShape(INPUT_K_IDX), Q_K_DO_DIM_NUM, INPUT_K_NAME) !=
-                        ge::GRAPH_SUCCESS,
-                    , return ge::GRAPH_FAILED);
-        OP_CHECK_IF(RequiredInputDimNumCheck(context_->GetInputShape(INPUT_DO_IDX), Q_K_DO_DIM_NUM, INPUT_DO_NAME) !=
-                        ge::GRAPH_SUCCESS,
-                    , return ge::GRAPH_FAILED);
-        OP_CHECK_IF(RequiredInputDimNumCheck(context_->GetInputShape(INPUT_G_IDX), G_DIM_NUM, INPUT_G_NAME) !=
-                        ge::GRAPH_SUCCESS,
-                    , return ge::GRAPH_FAILED);
-        // OP_CHECK_IF(RequiredInputDimNumCheck(context_->GetInputShape(INPUT_TRI_MATRIX_IDX), TRI_MATRIX_DIM_NUM,
+        // OP_CHECK_IF(RequiredInputDimNumCheck(context_->GetOptionalInputShape(INPUT_TRI_MATRIX_IDX),
+        // TRI_MATRIX_DIM_NUM,
         //                                      INPUT_TRI_MATRIX_NAME) != ge::GRAPH_SUCCESS,
         //             , return ge::GRAPH_FAILED);
         return ge::GRAPH_SUCCESS;
@@ -113,10 +119,10 @@ public:
 
     ge::graphStatus CommonTiling()
     {
-        const gert::Shape qStorageShape = context_->GetInputShape(INPUT_Q_IDX)->GetStorageShape();
-        const gert::Shape kStorageShape = context_->GetInputShape(INPUT_K_IDX)->GetStorageShape();
-        const gert::Shape dOStorageShape = context_->GetInputShape(INPUT_DO_IDX)->GetStorageShape();
-        const gert::Shape gStorageShape = context_->GetInputShape(INPUT_G_IDX)->GetStorageShape();
+        const gert::Shape qStorageShape = context_->GetOptionalInputShape(INPUT_Q_IDX)->GetStorageShape();
+        const gert::Shape kStorageShape = context_->GetOptionalInputShape(INPUT_K_IDX)->GetStorageShape();
+        const gert::Shape dOStorageShape = context_->GetOptionalInputShape(INPUT_DO_IDX)->GetStorageShape();
+        const gert::Shape gStorageShape = context_->GetOptionalInputShape(INPUT_G_IDX)->GetStorageShape();
         OP_CHECK_IF(CompareShape(qStorageShape, kStorageShape, INPUT_Q_NAME, INPUT_K_NAME, Q_K_DO_DIM_NUM) !=
                         ge::GRAPH_SUCCESS,
                     , return ge::GRAPH_FAILED);
@@ -159,6 +165,7 @@ public:
     void InterKernelSplit(int64_t chunkNumForT, int64_t totalCoreNum)
     {
         int64_t allChunkNum = chunkNumForT * tiling_.get_b(); // b*t , h核内循环
+        std::cout << "allChunkNum = " << allChunkNum << std::endl;
         int64_t chunkNumTailCore = allChunkNum / totalCoreNum;
         int64_t chunkNumPreCore = chunkNumTailCore + 1;
         int64_t preCoreNum = allChunkNum % totalCoreNum;
@@ -181,12 +188,25 @@ public:
 
     ge::graphStatus VariableLenTiling()
     {
+        const gert::StorageShape *cuSeqlensShape = context_->GetOptionalInputShape(INPUT_SEQLENS_IDX);
+        OP_CHECK_NULL_WITH_CONTEXT(context_, cuSeqlensShape);
+        OP_CHECK_IF(RequiredInputDimNumCheck(cuSeqlensShape, SEQLENS_DIM_NUM, INPUT_SEQLENS_NAME) != ge::GRAPH_SUCCESS,
+                    , return ge::GRAPH_FAILED);
+
         const gert::StorageShape *chunkIndicesShape = context_->GetOptionalInputShape(INPUT_CHUNK_INDICES_IDX);
         OP_CHECK_NULL_WITH_CONTEXT(context_, chunkIndicesShape);
+        OP_CHECK_IF(RequiredInputDimNumCheck(chunkIndicesShape, TRI_MATRIX_DIM_NUM, INPUT_CHUNK_INDICES_NAME) !=
+                        ge::GRAPH_SUCCESS,
+                    , return ge::GRAPH_FAILED);
         const gert::Shape chunkIndicesStorageShape = chunkIndicesShape->GetStorageShape();
+        int64_t chunkIndicesDim1 = chunkIndicesStorageShape.GetDim(DIM_1);
+        OP_CHECK_IF(chunkIndicesDim1 != CHUNK_INDICES_DIM_1_SIZE,
+                    OP_LOGE(context_->GetNodeName(),
+                            "Check chunk_indices shape failed, the dim 1 of chunk_indices should be 2, but get %ld.",
+                            chunkIndicesDim1),
+                    return ge::GRAPH_FAILED);
 
         InterKernelSplit(static_cast<int64_t>(chunkIndicesStorageShape.GetDim(DIM_0)), tiling_.get_totalCoreNum());
-
         return ge::GRAPH_SUCCESS;
     }
 };
@@ -230,8 +250,6 @@ ge::graphStatus Tiling4ChunkBwdDvLocal(gert::TilingContext *context)
                             "If cu_seqlens is not nullptr, the dim 0 of q needs to be 1, but now is %ld.",
                             tiling.get_b()),
                     return ge::GRAPH_FAILED);
-        auto chunkIndicesTensor = context->GetOptionalInputTensor(INPUT_CHUNK_INDICES_IDX);
-        OP_CHECK_NULL_WITH_CONTEXT(context, chunkIndicesTensor);
         OP_CHECK_IF(processor.VariableLenTiling() != ge::GRAPH_SUCCESS, , return ge::GRAPH_FAILED);
         tiling.set_isVariable(true);
     }
@@ -248,7 +266,7 @@ ge::graphStatus Tiling4ChunkBwdDvLocal(gert::TilingContext *context)
     uint32_t sysWorkspaceSize = ascendcPlatform.GetLibApiWorkSpaceSize();
     uint32_t userWorkspaceSize = 2 * tiling.get_b() * tiling.get_h() * tiling.get_t() * tiling.get_chunkSize();
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
-    currentWorkspace[0] = sysWorkspaceSize;
+    currentWorkspace[0] = sysWorkspaceSize + userWorkspaceSize;
 
     OP_LOGD(context->GetNodeName(), "Tiling4ChunkBwdDvLocal end.");
     return ge::GRAPH_SUCCESS;
