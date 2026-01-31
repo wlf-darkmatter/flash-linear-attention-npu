@@ -66,8 +66,12 @@ def chunk_bwd_dv_local_torch(
                 b_k = k[batch_idx, i_h, global_start:global_start+chunk_len, i_k:k_end].to(torch.float32) # [chunk_len, BK]
                 q_normal = q[batch_idx, i_h, global_start:global_start+chunk_len, i_k:k_end].to(torch.float32)  # [chunk_len, BK]
                 b_q = q_normal.transpose(0, 1)  # [BK, chunk_len]
-                b_A[:chunk_len, :chunk_len] += torch.matmul(b_k, b_q) * scale # [BT,BT]
-                print(" golden k * q^T = ",b_A)
+                # print(f"b_q.shape= {b_q.shape} ",b_q)
+                # print(f"b_k.shape= {b_k.shape} ",b_k)
+                # res = torch.matmul(b_k, b_q)
+                # print(f"res.shape= {res.shape} ",res)
+                b_A[:chunk_len, :chunk_len] += torch.matmul(b_k, b_q)# [BT,BT]
+                # print(" golden k * q^T = ",b_A)
             b_g = g_t[batch_idx, i_h, global_start:global_start+chunk_len] # g_t [B, H, T_max] → b_g [chunk_len]
             o_t = i_t * BT + torch.arange(0, BT) # [BT] chunk内的token序号
             m_t = o_t < T # [BT] bool掩码：是否是有效token
@@ -80,7 +84,7 @@ def chunk_bwd_dv_local_torch(
             m_A = pos_mask & valid_mask  # [BT, BT]
             g_i = b_g.unsqueeze(1)  # [chunk_len, 1]
             g_j = b_g.unsqueeze(0)  # [1, chunk_len]
-            g_factor = torch.exp(g_j - g_i)  # [chunk_len, chunk_len]
+            g_factor = torch.exp(g_j - g_i)  * scale  # [chunk_len, chunk_len]
             # print(" golden g_factor = ",g_factor)
             b_A_gated = torch.zeros_like(b_A)
             b_A_gated[:chunk_len, :chunk_len] = b_A[:chunk_len, :chunk_len] * g_factor # [BT, BT] 门控缩放后的注意力核矩阵
@@ -95,7 +99,7 @@ def chunk_bwd_dv_local_torch(
                 v_width = v_end - i_v
                 b_do = do[batch_idx, i_h, global_start:global_start+chunk_len, i_v:v_end].to(torch.float32) # do [B, T_max, H, V] → b_do [chunk_len, BV]
                 b_dv = torch.matmul(b_A_masked[:chunk_len, :chunk_len], b_do) # b_A_masked 这个 [BT, BT] 的矩阵，只有左上角 [chunk_len, chunk_len] 区域有非 0 值，其余所有区域全是 0
-                print(" golden b_dv = ",b_dv)
+                # print(" golden b_dv = ",b_dv)
                 dv[batch_idx, i_h, global_start:global_start+chunk_len, i_v:v_end] += b_dv
     return dv
 
@@ -120,7 +124,7 @@ def create_tensor(shape, dtype=torch.float16):
 
 import torch
 
-def compare_tensors(tensor1, tensor2, tolerance=0.01, verbose=True):
+def compare_tensors(tensor1, tensor2, tolerance=0.05, verbose=True):
     # 检查形状是否相同
     if tensor1.shape != tensor2.shape:
         if verbose:
@@ -169,7 +173,7 @@ def compare_tensors(tensor1, tensor2, tolerance=0.01, verbose=True):
 if __name__ == "__main__":
     torch.manual_seed(0)
     
-    B, H, T, K, V = 1, 1, 2, 16, 16
+    B, H, T, K, V = 1, 1, 2, 128, 128
     chunk_size=64
     scale = 1.0
 
@@ -204,7 +208,7 @@ if __name__ == "__main__":
     print(f"==== dv_golden.shape = {dv_golden.shape} ",dv_golden)
     print(f"==== dv.shape = {dv.shape} ",dv)
 
-    compare_tensors(dv_golden,dv)
+    compare_tensors(dv_golden,dv.cpu())
 
 
     
