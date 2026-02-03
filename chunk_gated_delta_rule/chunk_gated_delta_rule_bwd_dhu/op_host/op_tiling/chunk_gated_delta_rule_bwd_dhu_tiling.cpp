@@ -163,7 +163,7 @@ void ChunkGatedDeltaRuleBwdDhuTiling::SetWorkspaceSize(gert::TilingContext* cont
   auto platformInfoPtr = context->GetPlatformInfo();
   auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
   uint32_t totalCoreNum = ascendcPlatform.GetCoreNumAic();
-  uint32_t taskNum = B * H * tilingData.get_seqNum(); // 每个核处理一个batch的一个头的完整sequence
+  uint32_t taskNum = B * H * tilingData.get_seqNum(); // 變長：B*H*S，等長：B*H
   uint32_t usedCoreNum = taskNum > totalCoreNum ? totalCoreNum : taskNum;  
   tilingData.set_usedCoreNum(usedCoreNum);
   context->SetBlockDim(usedCoreNum);

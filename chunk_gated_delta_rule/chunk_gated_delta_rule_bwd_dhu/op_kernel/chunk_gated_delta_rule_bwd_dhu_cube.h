@@ -173,6 +173,7 @@ public:
         uint64_t chunkNum = 0;
         uint64_t seqNum = 0;
         uint64_t usedCoreNum = 0;
+        bool isVarLen = false;
         uint64_t bdvWorkspaceOffset = 0;
         uint64_t gQWorkspaceOffset = 0;
         uint64_t bdhTerm1WorkspaceOffset = 0;
@@ -187,7 +188,7 @@ public:
                LayoutGq layoutGq_, GM_ADDR dO_, LayoutDo layoutDo_,    
                GM_ADDR w_ , LayoutW layoutW_, GM_ADDR dv2_ , LayoutDv2 layoutDv2_, LayoutBdh layoutBdh_,
                GM_ADDR cu_seqlens_, uint64_t B_, uint64_t T_, uint64_t H_, uint64_t K_, uint64_t V_,
-               uint64_t BT_, uint64_t chunkNum_, uint64_t seqNum_, uint64_t usedCoreNum_,
+               uint64_t BT_, uint64_t chunkNum_, uint64_t seqNum_, uint64_t usedCoreNum_, bool isVarLen_,
                uint64_t bdvWorkspaceOffset_, uint64_t gQWorkspaceOffset_,uint64_t bdhTerm1WorkspaceOffset_, uint64_t bdhTerm2WorkspaceOffset_): 
             k(k_), 
             layoutK(layoutK_),
@@ -213,6 +214,7 @@ public:
             chunkNum(chunkNum_),
             seqNum(seqNum_),
             usedCoreNum(usedCoreNum_),
+            isVarLen(isVarLen_),
             bdvWorkspaceOffset(bdvWorkspaceOffset_),
             gQWorkspaceOffset(gQWorkspaceOffset_),
             bdhTerm1WorkspaceOffset(bdhTerm1WorkspaceOffset_),
@@ -233,6 +235,9 @@ public:
     void operator()<AscendC::AIC>(Params const &params) {
         GemmCoord ProblemShapeQdh{static_cast<uint32_t>(params.T),static_cast<uint32_t>(params.K), static_cast<uint32_t>(params.BT)}; 
         Arch::Resource<ArchTag> resource;
+        if (params.isVarLen) {
+            gmCuSeqlens.SetGlobalBuffer((__gm__ ElementInt *)params.cu_seqlens);
+        }
         l1ATensorBdv = resource.l1Buf.template GetBufferByByte<ElementK>(0);
         l1BTensorBdv = resource.l1Buf.template GetBufferByByte<ElementDh>(L1A_TILE_SIZE_BDV);
         l0ATensorBdv = resource.l0ABuf.template GetBufferByByte<ElementK>(0);
@@ -244,47 +249,14 @@ public:
         l0BTensorDh = resource.l0BBuf.template GetBufferByByte<ElementDh>(0);
         {
             // >>>>>>>>>>>>>变长：
-            // AscendC::CrossCoreWaitFlag<PIPE_MTE2>(SYNC_AIC_AIV_FLAG_0); // 等待前一个循环的Vec执行结束
-
-
-            gmCuSeqlens.SetGlobalBuffer((__gm__ ElementInt *)params.cu_seqlens);
-            // chunk_indices[seq_idx, chunk_idx]
-            // cu_seqlens[0, seq_len_0, seq_len_0 + seq_len_1, ...]
-
             // 每个核完成一个batch里的一个head的一个seqence里的所有chunk
-            uint32_t totalTaskNum = params.B * params.H * params.seqNum; // 2head 3 seqNum
+            uint32_t totalTaskNum = params.B * params.H * params.seqNum; // 等長seqNum=1
             uint32_t coreIdx = GetBlockIdx();
-            // AscendC::SetFlag<AscendC::HardEvent::FIX_M>(0);
-            // AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(mm2mte1EventId);
             for (uint32_t i = coreIdx; i < totalTaskNum; i += params.usedCoreNum) {
-                // 当前核要处理的seq
-                uint32_t seqIdx = i / params.H; // 当前任务在第几个seq
-                uint32_t h = i % params.H; // 当前任务在第几个h
-                // {0, 96, 224, 320} [0, 2, 4， 6]
-                uint64_t seqStartOffset = gmCuSeqlens.GetValue(seqIdx); // 当前seq在T中的起始索引
-                uint64_t seqEndOffset = gmCuSeqlens.GetValue(seqIdx+1); // 当前seq在T中的结束索引
-                uint64_t curSeqLen = seqEndOffset - seqStartOffset;
-                uint64_t tailChunkLen = curSeqLen % params.BT; 
-                // 计算当前seq的起始chunkIdx
-                uint64_t preChunkNum = 0;
-                uint64_t tmpStartOffset = 0;
-                uint64_t tmpEndOffset = 0;
-                uint64_t tmpChunkNum = 0;
-                for (uint32_t seq = 0; seq < seqIdx; seq++) {
-                    tmpStartOffset = gmCuSeqlens.GetValue(seq); // 当前seq在T中的起始索引
-                    tmpEndOffset = gmCuSeqlens.GetValue(seq+1); // 当前seq在T中的结束索引
-                    auto tmpChunkNum = ((tmpEndOffset - tmpStartOffset) + params.BT - 1) / params.BT;
-                    preChunkNum += tmpChunkNum;
-                }
-                int32_t curChunkNum = (curSeqLen + params.BT - 1) / params.BT; // 当前seq的chunk数
-                // calc offset
                 uint64_t b = 0;
-                uint64_t curSeqStartOffsetK = (b * params.H + h) * params.T * params.K + seqStartOffset * params.K;
-                uint64_t dhPreBHOffset = (b * params.H + h) * params.chunkNum * params.K * params.V + 
-                                        preChunkNum * params.K * params.V; // [B,H,chunk_num,K,V]
-                uint64_t curSeqStartOffsetV = (b * params.H + h) * params.T * params.V + seqStartOffset * params.V;
-                // AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l0AEventId);
-                // AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l0BEventId);
+                int32_t curChunkNum = 0;
+                uint64_t curSeqLen = 0;
+                CaclOffset(i, curChunkNum, curSeqLen, params);
                 uint32_t curBT = 0;
                 for (int32_t chunkIdx = curChunkNum - 1; chunkIdx >= 0; chunkIdx --) {
                     // cacl k @ dh
@@ -295,11 +267,10 @@ public:
                         CrossCoreWaitFlag(CROSS_CORE_V2C_BDH);
                         curBT = params.BT;  // BT = 64/128 is always 16 aligned
                         // init GlobalTensor
-                        gmK.SetGlobalBuffer((__gm__ ElementK *)params.k + curSeqStartOffsetK + chunkIdx * params.BT * params.K);
+                        gmK.SetGlobalBuffer((__gm__ ElementK *)params.k + gmOffsetK + chunkIdx * params.BT * params.K);
                          // 用的是上一次chunk迭代的结果
-                        gmDh.SetGlobalBuffer((__gm__ ElementDh *)params.dh + dhPreBHOffset + chunkIdx * params.K * params.V);
+                        gmDh.SetGlobalBuffer((__gm__ ElementDh *)params.dh + gmOffsetH + chunkIdx * params.K * params.V);
                         gmWsBdv.SetGlobalBuffer((__gm__ ElementDh *)params.workspace + coreIdx * params.BT * params.V);
-                        
                         auto tensorK = tla::MakeTensor(gmK, params.layoutK, Arch::PositionGM{});
                         auto tensorDh = tla::MakeTensor(gmDh, params.layoutDh, Arch::PositionGM{});
                         auto tensorBdv = tla::MakeTensor(gmWsBdv, params.layoutBdv, Arch::PositionGM{});
@@ -369,7 +340,7 @@ public:
                     {
                         CrossCoreWaitFlag(CROSS_CORE_V2C_GQ); // vec计算完一个chunk的gatedQ,通知cube可以开始计算对应的dh term1
                         gmGq.SetGlobalBuffer((__gm__ ElementGq *)params.workspace + params.gQWorkspaceOffset + coreIdx * params.BT * params.K);
-                        gmDo.SetGlobalBuffer((__gm__ ElementDo *)params.dO + curSeqStartOffsetV + chunkIdx * params.BT * params.V);
+                        gmDo.SetGlobalBuffer((__gm__ ElementDo *)params.dO + gmOffsetV + chunkIdx * params.BT * params.V);
                         gmDhTerm1.SetGlobalBuffer((__gm__ ElementDh *)params.workspace + params.bdhTerm1WorkspaceOffset + coreIdx * params.K * params.V);
                         auto tensorGq = tla::MakeTensor(gmGq, params.layoutGq, Arch::PositionGM{});
                         auto tensorDo = tla::MakeTensor(gmDo, params.layoutDo, Arch::PositionGM{});
@@ -437,8 +408,8 @@ public:
                         // w @ dv2 -> bdh_term2
                         CrossCoreWaitFlag(CROSS_CORE_V2C_DV2);
                         
-                        gmW.SetGlobalBuffer((__gm__ ElementW *)params.w + curSeqStartOffsetK + chunkIdx * params.BT * params.K);
-                        gmDv2.SetGlobalBuffer((__gm__ ElementDv2 *)params.dv2 + curSeqStartOffsetV + chunkIdx * params.BT * params.V);
+                        gmW.SetGlobalBuffer((__gm__ ElementW *)params.w + gmOffsetK + chunkIdx * params.BT * params.K);
+                        gmDv2.SetGlobalBuffer((__gm__ ElementDv2 *)params.dv2 + gmOffsetV + chunkIdx * params.BT * params.V);
                         gmDhTerm2.SetGlobalBuffer((__gm__ ElementDh *)params.workspace + params.bdhTerm2WorkspaceOffset + coreIdx * params.K * params.V);
                         auto tensorW = tla::MakeTensor(gmW, params.layoutW, Arch::PositionGM{});
                         auto tensorDv2 = tla::MakeTensor(gmDv2, params.layoutDv2, Arch::PositionGM{});
@@ -503,14 +474,48 @@ public:
                         CrossCoreSetFlag<0x2, PIPE_FIX>(CROSS_CORE_C2V_TERM2);
                     }
                 }
-                // AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(mm2mte1EventId); // 等上次MM结束
-                // AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(0);
             }
         }
         return;
     }
     
 private:
+    CATLASS_DEVICE void CaclOffset(const uint32_t taskIdx, int32_t& curChunkNum, uint64_t& curSeqLen, Params const& params)
+    {
+        uint64_t seqStartOffset = 0;
+        uint64_t preChunkNum = 0;
+        uint64_t b = 0;
+        uint32_t h = taskIdx % params.H; // 当前任务在第几个h 
+        if (params.isVarLen) {
+            uint32_t seqIdx = taskIdx / params.H; // 当前任务在第几个seq
+            // {0, 96, 224, 320} [0, 2, 4， 6]
+            seqStartOffset = gmCuSeqlens.GetValue(seqIdx); // 当前seq在T中的起始索引
+            uint64_t seqEndOffset = gmCuSeqlens.GetValue(seqIdx+1); // 当前seq在T中的结束索引
+            curSeqLen = seqEndOffset - seqStartOffset;
+            uint64_t tailChunkLen = curSeqLen % params.BT; 
+            // 计算当前seq的起始chunkIdx
+            uint64_t tmpStartOffset = 0;
+            uint64_t tmpEndOffset = 0;
+            uint64_t tmpChunkNum = 0;
+            for (uint32_t seq = 0; seq < seqIdx; seq++) {
+                tmpStartOffset = gmCuSeqlens.GetValue(seq); // 当前seq在T中的起始索引
+                tmpEndOffset = gmCuSeqlens.GetValue(seq+1); // 当前seq在T中的结束索引
+                auto tmpChunkNum = ((tmpEndOffset - tmpStartOffset) + params.BT - 1) / params.BT;
+                preChunkNum += tmpChunkNum;
+            }
+            curChunkNum = (curSeqLen + params.BT - 1) / params.BT; // 当前seq的chunk数
+            // calc offset
+        } else {
+            curChunkNum = params.chunkNum;
+            b = taskIdx / params.H;
+            curSeqLen = params.T;
+        }
+        gmOffsetK = (b * params.H + h) * params.T * params.K + seqStartOffset * params.K;
+        gmOffsetH = (b * params.H + h) * params.chunkNum * params.K * params.V + 
+                    preChunkNum * params.K * params.V; // [B,H,chunk_num,K,V]
+        gmOffsetV = (b * params.H + h) * params.T * params.V + seqStartOffset * params.V;
+    }
+
     AscendC::GlobalTensor<ElementInt> gmCuSeqlens;
 
     AscendC::GlobalTensor<ElementK> gmK; // [B,H,T,K]
@@ -551,9 +556,10 @@ private:
     TileMmadBdv tileMmadBdv;
     TileMmadDh1 tileMmadDh1;
     TileMmadDh2 tileMmadDh2;
-    // CopyGmToL1A copyGmToL1A;
-    // CopyGmToL1B copyGmToL1B;
-    // CopyL0CToGm copyL0CToGm;
+
+    uint64_t gmOffsetK = 0;
+    uint64_t gmOffsetV = 0;
+    uint64_t gmOffsetH = 0;
 };
 }
 
@@ -671,13 +677,12 @@ __aicore__ inline void GDRCube<DT>::Process()
                                                       L1TileShapeBdv, L0TileShapeBdv, TileCopyBdv,
                                                       L1TileShapeDh, L0TileShapeDh, TileCopyDh1, TileCopyDh2>;
 
-
     GDRKernel kernel;
     typename GDRKernel::Params param{k, layoutK, dh, layoutDh, workspace, layoutBdv, // k @ dh -> bdv[workspace ]
                                      layoutGq, dO, layoutDo,                // gatedQ^T[workspace ] @ do -> bdh[workspace]
                                      w, layoutW, dv2, layoutDv2, layoutBdh, // w^T @ dv2 -> bdh[workspace] 
                                      cu_seqlens, this->B, this->T, this->H, this->K, this->V, 
-                                     this->chunkSize, this->chunkNum, this->seqNum, this->usedCoreNum,
+                                     this->chunkSize, this->chunkNum, this->seqNum, this->usedCoreNum, static_cast<bool>(this->isVarLen),
                                      bdvWorkspaceOffset, gQWorkspaceOffset, bdhTerm1WorkspaceOffset, bdhTerm2WorkspaceOffset};
     kernel(param);
     return;
