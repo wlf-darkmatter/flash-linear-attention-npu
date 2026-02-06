@@ -13,11 +13,12 @@
  * \brief
  */
 #include "kernel_operator.h"
+#include "lib/matmul_intf.h"
 #include "prepare_wy_repr_bwd_full_common.h"
 #include "prepare_wy_repr_bwd_full_cube.h"
 #include "prepare_wy_repr_bwd_full_vector.h"
-#include "lib/matmul_intf.h"
-// #include "kernel_basic_intf.h"
+
+
 using namespace AscendC;
 __global__ __aicore__ void prepare_wy_repr_bwd_full(GM_ADDR k, GM_ADDR v, GM_ADDR beta, GM_ADDR A, GM_ADDR dA,
                                                     GM_ADDR dw, GM_ADDR du, GM_ADDR g, GM_ADDR cu_seqlens,
