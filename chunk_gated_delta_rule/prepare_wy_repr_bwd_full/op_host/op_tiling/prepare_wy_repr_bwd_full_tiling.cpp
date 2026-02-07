@@ -196,7 +196,7 @@ public:
 
     ge::graphStatus FixLenTiling()
     {
-        tiling_.set_chunkNum(CeilDiv(tiling_.get_T(), tiling_.get_chunkSize()));
+        tiling_.set_chunkNum(tiling_.get_B() * CeilDiv(tiling_.get_T(), tiling_.get_chunkSize()));
         return ge::GRAPH_SUCCESS;
     }
 
