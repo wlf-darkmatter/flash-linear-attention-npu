@@ -164,57 +164,6 @@ public:
     void operator()<AscendC::AIC>(Params const &params) {
         Arch::Resource<ArchTag> resource;
         uint32_t coreIdx = AscendC::GetBlockIdx();
-        {   // 计算第二个矩阵乘 dA_2 = du @ vb.T     V->C
-            AscendC::CrossCoreSetFlag<0x2, PIPE_MTE2>(SYNC_AIC_AIV_FLAG_5);
-            AscendC::CrossCoreSetFlag<0x2, PIPE_MTE2>(SYNC_AIC_AIV_FLAG_5);
-            AscendC::CrossCoreSetFlag<0x2, PIPE_MTE2>(SYNC_AIC_AIV_FLAG_5);
-            AscendC::CrossCoreSetFlag<0x2, PIPE_MTE2>(SYNC_AIC_AIV_FLAG_5);
-            AscendC::printf("###yzq CrossCoreSetFlag ### 1\n");
-            AscendC::printf("###yzq CrossCoreSetFlag ### 2\n");
-            AscendC::printf("###yzq CrossCoreSetFlag ### 3\n");
-            AscendC::printf("###yzq CrossCoreSetFlag ### 4\n");
-            uint32_t coreLoopsInB = CeilDiv(params.T, params.BT);
-            uint32_t coreLoops = params.B * coreLoopsInB;
-            BlockMmadDA2 blockMmadDA2(resource);
-            for (uint32_t loopIdx = coreIdx; loopIdx < coreLoops; loopIdx += AscendC::GetBlockNum()) {
-                uint32_t bIdx = loopIdx / coreLoopsInB;
-                uint32_t chunkIdx = loopIdx % coreLoopsInB;
-                GemmCoord blockCoord{0, 0, 0};
-                GemmCoord actualBlockShape{static_cast<uint32_t>(params.BT), static_cast<uint32_t>(params.V), static_cast<uint32_t>(params.BT)};
-                for (int h = 0; h < params.H; h++) {
-                    // Represent the full gm
-                    AscendC::GlobalTensor<ElementDu> gmDu;
-                    gmDu.SetGlobalBuffer((__gm__ ElementDu *)params.ptrDu + ((bIdx * params.H + h) * params.T + chunkIdx * params.BT) * params.V);
-                    AscendC::GlobalTensor<ElementVb> gmVb;
-                    gmVb.SetGlobalBuffer((__gm__ ElementVb *)params.ptrVb + ((bIdx * params.H + h) * params.T + chunkIdx * params.BT) * params.V);
-                    AscendC::GlobalTensor<ElementDA2> gmDA2;
-                    gmDA2.SetGlobalBuffer((__gm__ ElementDA2 *)params.ptrDA2 + ((bIdx * params.H + h) * params.T + chunkIdx * params.BT) * params.BT);
-
-                    // Represent the full tensors
-                    auto tensorDu = tla::MakeTensor(gmDu, params.layoutDu, Arch::PositionGM{});
-                    auto tensorVb = tla::MakeTensor(gmVb, params.layoutVb, Arch::PositionGM{});
-                    auto tensorDA2 = tla::MakeTensor(gmDA2, params.layoutDA2, Arch::PositionGM{});
-
-                    AscendC::CrossCoreWaitFlag(SYNC_AIV_AIC_FLAG_3);
-                    AscendC::printf("###yzq CrossCoreWaitFlag ### AIV finish\n");
-                    // Make tiled views
-                    auto tensorBlockDu = GetTile(tensorDu,
-                                                tla::MakeCoord(0, 0),
-                                                tla::MakeShape(actualBlockShape.m(), actualBlockShape.k()));
-                    auto tensorBlockVb = GetTile(tensorVb,
-                                                tla::MakeCoord(0, 0),
-                                                tla::MakeShape(actualBlockShape.k(), actualBlockShape.n()));
-                    auto tensorBlockDA2 = GetTile(tensorDA2,
-                                                tla::MakeCoord(0, 0),
-                                                tla::MakeShape(actualBlockShape.m(), actualBlockShape.n()));
-                    // Compute block-scoped matrix multiply-add
-                    blockMmadDA2(tensorBlockDu, tensorBlockVb, tensorBlockDA2, actualBlockShape);
-                    AscendC::CrossCoreSetFlag<0x2, PIPE_MTE2>(SYNC_AIC_AIV_FLAG_5);
-                    AscendC::printf("###yzq CrossCoreSetFlag ### AIC finish\n");
-                }
-            }
-        }
-        AscendC::SyncAll<false>();
         {   // 计算第一个矩阵乘 dA_1 = dw @ kbg.T     V->C
             AscendC::CrossCoreSetFlag<0x2, PIPE_MTE2>(SYNC_AIC_AIV_FLAG_5);
             AscendC::CrossCoreSetFlag<0x2, PIPE_MTE2>(SYNC_AIC_AIV_FLAG_5);
@@ -227,7 +176,7 @@ public:
                 uint32_t bIdx = loopIdx / coreLoopsInB;
                 uint32_t chunkIdx = loopIdx % coreLoopsInB;
                 GemmCoord blockCoord{0, 0, 0};
-                GemmCoord actualBlockShape{static_cast<uint32_t>(params.BT), static_cast<uint32_t>(params.K), static_cast<uint32_t>(params.BT)};
+                GemmCoord actualBlockShape{static_cast<uint32_t>(params.BT), static_cast<uint32_t>(params.BT), static_cast<uint32_t>(params.K)};
                 // AscendC::printf("blockCoord.m(%d)  blockCoord.n(%d)\n",blockCoord.m(), blockCoord.n());
                 for (int h = 0; h < params.H; h++) {
                     // Represent the full gm
@@ -259,6 +208,57 @@ public:
                     blockMmadDA1(tensorBlockDw, tensorBlockKbg, tensorBlockDA1, actualBlockShape);
                     AscendC::CrossCoreSetFlag<0x2, PIPE_FIX>(SYNC_AIC_AIV_FLAG_5);
                     // AscendC::printf("CrossCoreSetFlag\n");
+                }
+            }
+        }
+        AscendC::SyncAll<false>();
+        {   // 计算第二个矩阵乘 dA_2 = du @ vb.T     V->C
+            AscendC::CrossCoreSetFlag<0x2, PIPE_MTE2>(SYNC_AIC_AIV_FLAG_5);
+            AscendC::CrossCoreSetFlag<0x2, PIPE_MTE2>(SYNC_AIC_AIV_FLAG_5);
+            AscendC::CrossCoreSetFlag<0x2, PIPE_MTE2>(SYNC_AIC_AIV_FLAG_5);
+            AscendC::CrossCoreSetFlag<0x2, PIPE_MTE2>(SYNC_AIC_AIV_FLAG_5);
+            // AscendC::printf("###yzq CrossCoreSetFlag ### 1\n");
+            // AscendC::printf("###yzq CrossCoreSetFlag ### 2\n");
+            // AscendC::printf("###yzq CrossCoreSetFlag ### 3\n");
+            // AscendC::printf("###yzq CrossCoreSetFlag ### 4\n");
+            uint32_t coreLoopsInB = CeilDiv(params.T, params.BT);
+            uint32_t coreLoops = params.B * coreLoopsInB;
+            BlockMmadDA2 blockMmadDA2(resource);
+            for (uint32_t loopIdx = coreIdx; loopIdx < coreLoops; loopIdx += AscendC::GetBlockNum()) {
+                uint32_t bIdx = loopIdx / coreLoopsInB;
+                uint32_t chunkIdx = loopIdx % coreLoopsInB;
+                GemmCoord blockCoord{0, 0, 0};
+                GemmCoord actualBlockShape{static_cast<uint32_t>(params.BT), static_cast<uint32_t>(params.BT), static_cast<uint32_t>(params.V)};
+                for (int h = 0; h < params.H; h++) {
+                    // Represent the full gm
+                    AscendC::GlobalTensor<ElementDu> gmDu;
+                    gmDu.SetGlobalBuffer((__gm__ ElementDu *)params.ptrDu + ((bIdx * params.H + h) * params.T + chunkIdx * params.BT) * params.V);
+                    AscendC::GlobalTensor<ElementVb> gmVb;
+                    gmVb.SetGlobalBuffer((__gm__ ElementVb *)params.ptrVb + ((bIdx * params.H + h) * params.T + chunkIdx * params.BT) * params.V);
+                    AscendC::GlobalTensor<ElementDA2> gmDA2;
+                    gmDA2.SetGlobalBuffer((__gm__ ElementDA2 *)params.ptrDA2 + ((bIdx * params.H + h) * params.T + chunkIdx * params.BT) * params.BT);
+
+                    // Represent the full tensors
+                    auto tensorDu = tla::MakeTensor(gmDu, params.layoutDu, Arch::PositionGM{});
+                    auto tensorVb = tla::MakeTensor(gmVb, params.layoutVb, Arch::PositionGM{});
+                    auto tensorDA2 = tla::MakeTensor(gmDA2, params.layoutDA2, Arch::PositionGM{});
+
+                    AscendC::CrossCoreWaitFlag(SYNC_AIV_AIC_FLAG_3);
+                    // AscendC::printf("###yzq CrossCoreWaitFlag ### AIV finish\n");
+                    // Make tiled views
+                    auto tensorBlockDu = GetTile(tensorDu,
+                                                tla::MakeCoord(0, 0),
+                                                tla::MakeShape(actualBlockShape.m(), actualBlockShape.k()));
+                    auto tensorBlockVb = GetTile(tensorVb,
+                                                tla::MakeCoord(0, 0),
+                                                tla::MakeShape(actualBlockShape.k(), actualBlockShape.n()));
+                    auto tensorBlockDA2 = GetTile(tensorDA2,
+                                                tla::MakeCoord(0, 0),
+                                                tla::MakeShape(actualBlockShape.m(), actualBlockShape.n()));
+                    // Compute block-scoped matrix multiply-add
+                    blockMmadDA2(tensorBlockDu, tensorBlockVb, tensorBlockDA2, actualBlockShape);
+                    AscendC::CrossCoreSetFlag<0x2, PIPE_MTE2>(SYNC_AIC_AIV_FLAG_5);
+                    // AscendC::printf("###yzq CrossCoreSetFlag ### AIC finish\n");
                 }
             }
         }
@@ -411,6 +411,12 @@ __aicore__ inline PrepareWyReprBwdDAProcess<kType, betaType>::PrepareWyReprBwdDA
 
 template <typename kType, typename betaType>
 __aicore__ void inline PrepareWyReprBwdDAProcess<kType, betaType>::Init(const PrepareWyReprBwdDaTilingData &tiling) {
+    // B = tiling.B;
+    // T = tiling.T;
+    // H = tiling.H;
+    // K = tiling.K;
+    // V = tiling.V;
+    // BT = tiling.BT;
     return;
 }
 
@@ -496,17 +502,25 @@ __aicore__ void inline PrepareWyReprBwdDAProcess<kType, betaType>::Process() {
 
     MatmulKernel kernel;
 
+    // ptrVb/ptrKbg 必须指向 Vector 写入的 workspace 区域：vb / kbg=workSpace2Tensor(基址+B*H*T*BT 元素)
+    GM_ADDR ptrVb = reinterpret_cast<GM_ADDR>(reinterpret_cast<uint64_t>(workspace) + static_cast<uint64_t>(B * H * T * BT) * sizeof(kType));
+    GM_ADDR ptrKbg = ptrVb;
+    GM_ADDR ptrDA1 = dA;
+    GM_ADDR ptrDA2 = workspace;
+    GM_ADDR ptrDA4 = workspace;
+    GM_ADDR ptrDA5 = dA;
+    GM_ADDR ptrDA6 = workspace;
     typename MatmulKernel::Params param{
         dw, layoutDw,
-        dw, layoutKbg,
-        workspace, layoutDA1,
+        ptrKbg, layoutKbg,
+        ptrDA1, layoutDA1,
         du, layoutDu,
-        du, layoutVb,
-        workspace, layoutDA2,
-        A, layoutDA4,
+        ptrVb, layoutVb,
+        ptrDA2, layoutDA2,
+        ptrDA4, layoutDA4,
         A, layoutAT,
-        workspace, layoutDA5,
-        workspace, layoutDA6,
+        ptrDA5, layoutDA5,
+        ptrDA6, layoutDA6,
         B, T, H, K, V, BT, 4};
 
     kernel(param);
