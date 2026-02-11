@@ -41,7 +41,7 @@ ASCENDC_EXTERN_C ge::graphStatus TilingWyReprBwdDa(gert::TilingContext* context)
     return ge::GRAPH_SUCCESS;
 }
 
-ASCENDC_EXTERN_C ge::graphStatus TilingPrepareForWyReprBwdDA(gert::TilingParseContext* context)
+ASCENDC_EXTERN_C ge::graphStatus TilingPrepareForWyReprBwdDa(gert::TilingParseContext* context)
 {
     return ge::GRAPH_SUCCESS;
 }
