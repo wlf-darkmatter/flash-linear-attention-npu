@@ -119,7 +119,7 @@ __aicore__ void inline PrepareWyReprBwdDAVectorProcess<kType, betaType>::Init(co
     workSpace2Tensor.SetGlobalBuffer((__gm__ kType *)workspace + B * H * T * BT);
     dA1Tensor.SetGlobalBuffer((__gm__ kType *)dA);
     dA2Tensor.SetGlobalBuffer((__gm__ kType *)workspace);
-    dA4Tensor.SetGlobalBuffer((__gm__ kType *)dA);
+    dA4Tensor.SetGlobalBuffer((__gm__ kType *)workspace);
     dA5Tensor.SetGlobalBuffer((__gm__ kType *)dA);
     dA6Tensor.SetGlobalBuffer((__gm__ kType *)workspace);
     return;
@@ -420,7 +420,7 @@ __aicore__ void inline PrepareWyReprBwdDAVectorProcess<kType, betaType>::Process
     AscendC::DataCopyExtParams copyParams{1, 0, 0, 0, 0};
     copyParams.blockLen = BT * BT / BIT_NUM_FOR_UINT8;
     AscendC::DataCopyPad(maskLocalTensor, maskTensor, copyParams, {false, 0, 0, 0});
-    DumpTensor(maskLocalTensor, 1, BT * BT / BIT_NUM_FOR_UINT8);
+    // DumpTensor(maskLocalTensor, 1, BT * BT / BIT_NUM_FOR_UINT8);
     MTE2ToVSync();
     AscendC::Duplicate<float>(zeroFp32LocalTensor, float(0.0), BLOCK_SIZE / SIZE_FLOAT);
 

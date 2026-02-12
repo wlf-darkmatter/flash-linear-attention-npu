@@ -177,7 +177,7 @@ public:
                 uint32_t chunkIdx = loopIdx % coreLoopsInB;
                 GemmCoord blockCoord{0, 0, 0};
                 GemmCoord actualBlockShape{static_cast<uint32_t>(params.BT), static_cast<uint32_t>(params.BT), static_cast<uint32_t>(params.K)};
-                AscendC::printf("actualBlockShape.m(%d)  actualBlockShape.n(%d)\n",actualBlockShape.m(), actualBlockShape.n());
+                // AscendC::printf("actualBlockShape.m(%d)  actualBlockShape.n(%d)\n",actualBlockShape.m(), actualBlockShape.n());
                 for (int h = 0; h < params.H; h++) {
                     // Represent the full gm
                     AscendC::GlobalTensor<ElementDw> gmDw;
@@ -302,7 +302,7 @@ public:
                                                 tla::MakeShape(actualBlockShape.m(), actualBlockShape.n()));
                     
                     // Compute block-scoped matrix multiply-add
-                    // blockMmadDA5(tensorBlockDA4, tensorBlockAT, tensorBlockDA5, actualBlockShape);
+                    blockMmadDA5(tensorBlockDA4, tensorBlockAT, tensorBlockDA5, actualBlockShape);
                     // 注意：这里可能需要设置计算完成的标志
                     AscendC::CrossCoreSetFlag<0x2, PIPE_FIX>(SYNC_AIC_AIV_FLAG_5);
                 }
