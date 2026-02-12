@@ -112,9 +112,6 @@ __aicore__ inline void ChunkBwdDvLocalCube<QKVT, GT, Strategy>::Process()
         for (int64_t loopIdx = coreIdx; loopIdx < coreLoops; loopIdx += blockNum) {
             int64_t curBatchId = static_cast<int64_t>(loopIdx) / strategy.chunkNumForT;
             IndexResult indexResult = strategy.calculate(loopIdx);
-            if (indexResult.chunkLen <= 0) {
-                continue;
-            }
             Catlass::GemmCoord actualBlockShape{static_cast<uint32_t>(indexResult.chunkLen),
                                                 static_cast<uint32_t>(indexResult.chunkLen), static_cast<uint32_t>(K)};
             for (int hIndex = 0; hIndex < H; hIndex++) {
@@ -135,10 +132,13 @@ __aicore__ inline void ChunkBwdDvLocalCube<QKVT, GT, Strategy>::Process()
                     GetTile(tensorB, tla::MakeCoord(0, 0), tla::MakeShape(actualBlockShape.k(), actualBlockShape.n()));
                 auto tensorBlockC =
                     GetTile(tensorC, tla::MakeCoord(0, 0), tla::MakeShape(actualBlockShape.m(), actualBlockShape.n()));
+
                 blockMmad(tensorBlockA, tensorBlockB, tensorBlockC, actualBlockShape);
                 AscendC::CrossCoreSetFlag<0x2, PIPE_FIX>(SYNC_AIC_AIV_FLAG_3);
             }
         }
+        AscendC::CrossCoreWaitFlag(SYNC_AIV_AIC_FLAG_1);
+        AscendC::CrossCoreWaitFlag(SYNC_AIV_AIC_FLAG_1);
         AscendC::CrossCoreWaitFlag(SYNC_AIV_AIC_FLAG_1);
         AscendC::CrossCoreWaitFlag(SYNC_AIV_AIC_FLAG_1);
     }
@@ -161,9 +161,6 @@ __aicore__ inline void ChunkBwdDvLocalCube<QKVT, GT, Strategy>::Process()
         for (int64_t loopIdx = coreIdx; loopIdx < coreLoops; loopIdx += blockNum) {
             int64_t curBatchId = static_cast<int64_t>(loopIdx) / strategy.chunkNumForT;
             IndexResult indexResult = strategy.calculate(loopIdx);
-            if (indexResult.chunkLen <= 0) {
-                continue;
-            }
             Catlass::GemmCoord actualBlockShape{static_cast<uint32_t>(indexResult.chunkLen), static_cast<uint32_t>(V),
                                                 static_cast<uint32_t>(indexResult.chunkLen)};
             for (int hIndex = 0; hIndex < H; hIndex++) {

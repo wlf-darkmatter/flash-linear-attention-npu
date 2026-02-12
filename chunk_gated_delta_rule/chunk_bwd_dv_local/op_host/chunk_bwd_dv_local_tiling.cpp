@@ -104,10 +104,10 @@ public:
         OP_CHECK_IF(RequiredInputDimNumCheck(context_->GetOptionalInputShape(INPUT_G_IDX), G_DIM_NUM, INPUT_G_NAME) !=
                         ge::GRAPH_SUCCESS,
                     , return ge::GRAPH_FAILED);
-        // OP_CHECK_IF(RequiredInputDimNumCheck(context_->GetOptionalInputShape(INPUT_TRI_MATRIX_IDX),
-        // TRI_MATRIX_DIM_NUM,
-        //                                      INPUT_TRI_MATRIX_NAME) != ge::GRAPH_SUCCESS,
-        //             , return ge::GRAPH_FAILED);
+        OP_CHECK_IF(RequiredInputDimNumCheck(context_->GetOptionalInputShape(INPUT_TRI_MATRIX_IDX),
+        TRI_MATRIX_DIM_NUM,
+                                             INPUT_TRI_MATRIX_NAME) != ge::GRAPH_SUCCESS,
+                    , return ge::GRAPH_FAILED);
         return ge::GRAPH_SUCCESS;
     }
 
@@ -250,8 +250,7 @@ ge::graphStatus Tiling4ChunkBwdDvLocal(gert::TilingContext *context)
     context->SetBlockDim(std::min(tiling.get_chunkNumForT() * tiling.get_b(), coreNum));
 
     uint32_t sysWorkspaceSize = ascendcPlatform.GetLibApiWorkSpaceSize();
-    uint32_t userWorkspaceSize =
-        QKV_DTYPE_SIZE * tiling.get_b() * tiling.get_h() * tiling.get_t() * tiling.get_chunkSize();
+    uint32_t userWorkspaceSize = QKV_DTYPE_SIZE * tiling.get_b() * tiling.get_h() * tiling.get_t() * tiling.get_chunkSize();
     size_t *currentWorkspace = context->GetWorkspaceSizes(1);
     currentWorkspace[0] = sysWorkspaceSize + userWorkspaceSize;
     context->SetScheduleMode(1);
