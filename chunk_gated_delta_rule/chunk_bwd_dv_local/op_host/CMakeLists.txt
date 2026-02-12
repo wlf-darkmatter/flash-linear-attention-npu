@@ -15,13 +15,13 @@ if (BUILD_OPEN_PROJECT)
     )
 endif()
 
-if (BUILD_OPS_RTY_KERNEL) # 回黄kernel
-    add_ops_compile_options(
-        OP_NAME ChunkBwdDvLocal
-        OPTIONS --cce-auto-sync=off
-                -Wno-deprecated-declarations
-                -Werror
-    )
-else()
-    add_modules_sources(OPTYPE chunk_bwd_dv_local ACLNNTYPE aclnn)
-endif()
+add_modules_sources(OPTYPE chunk_bwd_dv_local ACLNNTYPE aclnn)
+add_ops_compile_options(
+    OP_NAME ChunkBwdDvLocal
+    OPTIONS --cce-auto-sync=off
+            -Wno-deprecated-declarations
+            -Werror
+            -g
+)
+
+

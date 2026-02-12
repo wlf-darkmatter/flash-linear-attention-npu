@@ -17,8 +17,14 @@
 #define CHUNK_BWD_DV_LOCAL_COMMON_H
 
 namespace GDN {
+constexpr int32_t NUM_2 = 2;
+constexpr int32_t BIT_NUM_FOR_UINT8 = 8;
 constexpr int32_t BUFFER_NUM = 2;
 constexpr int32_t SIZE_FLOAT = 4;
+constexpr int32_t BLOCK_SIZE = 32;
+constexpr int32_t MASK_ALIGN_LINE = 4; // chunk_size = 64 场景下，mask一行8B，4行32B对齐
+constexpr int32_t CHUNK_SIZE_64 = 64;
+constexpr int32_t CAL_NUM_FLOAT = 64; // API一次能处理256B，能计算64个float元素
 constexpr uint64_t SYNC_AIV_AIC_FLAG_1 = 1;
 constexpr uint64_t SYNC_AIV_AIC_FLAG_2 = 2;
 constexpr uint64_t SYNC_AIC_AIV_FLAG_3 = 3;
@@ -32,6 +38,7 @@ __aicore__ inline int64_t CeilDiv(int64_t dividend, int64_t divisor)
     return (dividend + divisor - 1) / divisor;
 }
 
+
 __aicore__ inline void MTE2ToVSync()
 {
     event_t eventIDMTE2ToV = static_cast<event_t>(GetTPipePtr()->FetchEventID(AscendC::HardEvent::MTE2_V));
@@ -39,25 +46,13 @@ __aicore__ inline void MTE2ToVSync()
     AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(eventIDMTE2ToV);
 }
 
-__aicore__ inline void MTE3ToVSync()
-{
-    event_t eventIMTE3ToV = static_cast<event_t>(GetTPipePtr()->FetchEventID(AscendC::HardEvent::MTE3_V));
-    AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(eventIMTE3ToV);
-    AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(eventIMTE3ToV);
-}
-
-__aicore__ inline void VToMTE3Sync()
-{
-    event_t eventIDVToMTE3 = static_cast<event_t>(GetTPipePtr()->FetchEventID(AscendC::HardEvent::V_MTE3));
-    AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(eventIDVToMTE3);
-    AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(eventIDVToMTE3);
-}
-
 struct IndexResult {
+    int64_t curBatchId;
     int64_t curTokenId;
     int64_t chunkLen;
 
-    __aicore__ inline IndexResult(int64_t curTokenId, int64_t chunkLen) : curTokenId(curTokenId), chunkLen(chunkLen)
+    __aicore__ inline IndexResult(int64_t curBatchId_, int64_t curTokenId, int64_t chunkLen)
+        : curBatchId(curBatchId_), curTokenId(curTokenId), chunkLen(chunkLen)
     {
     }
 };
@@ -78,7 +73,7 @@ struct FixedLengthStrategy {
         int64_t curChunkId = loopIdx % chunkNumForT;
         int64_t curTokenId = curChunkId * chunkSize;
         int64_t chunkLen = curChunkId == chunkNumForT - 1 ? chunkLenTail : chunkSize;
-        return IndexResult(curTokenId, chunkLen);
+        return IndexResult(loopIdx / chunkNumForT, curTokenId, chunkLen);
     }
 };
 
@@ -108,7 +103,8 @@ struct VariableLengthStrategy {
         int64_t chunkStartToken = curSeqChunkId * chunkSize;
         int64_t chunkEndToken = chunkStartToken + chunkSize;
         chunkEndToken = chunkEndToken > curSeqT ? curSeqT : chunkEndToken;
-        return IndexResult(bos + chunkStartToken, chunkEndToken - chunkStartToken);
+        // AscendC::PipeBarrier<PIPE_ALL>();
+        return IndexResult(0, bos + chunkStartToken, chunkEndToken - chunkStartToken);
     }
 };
 
