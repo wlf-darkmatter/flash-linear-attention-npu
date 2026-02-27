@@ -51,8 +51,10 @@ struct IndexResult {
     int64_t curTokenId;
     int64_t chunkLen;
 
-    __aicore__ inline IndexResult(int64_t curBatchId_, int64_t curTokenId, int64_t chunkLen)
-        : curBatchId(curBatchId_), curTokenId(curTokenId), chunkLen(chunkLen)
+    __aicore__ inline IndexResult() : curBatchId(0), curTokenId(0), chunkLen(0) {}
+    
+    __aicore__ inline IndexResult(int64_t curBatchId_, int64_t curTokenId_, int64_t chunkLen_)
+        : curBatchId(curBatchId_), curTokenId(curTokenId_), chunkLen(chunkLen_)
     {
     }
 };
@@ -68,12 +70,12 @@ struct FixedLengthStrategy {
         chunkLenTail = lenT - (chunkNumForT - 1) * chunkSize;
     }
 
-    __aicore__ inline IndexResult calculate(int64_t loopIdx) const
+    __aicore__ inline void calculate(int64_t loopIdx, IndexResult& result) const
     {
         int64_t curChunkId = loopIdx % chunkNumForT;
-        int64_t curTokenId = curChunkId * chunkSize;
-        int64_t chunkLen = curChunkId == chunkNumForT - 1 ? chunkLenTail : chunkSize;
-        return IndexResult(loopIdx / chunkNumForT, curTokenId, chunkLen);
+        result.curTokenId = curChunkId * chunkSize;
+        result.chunkLen = curChunkId == chunkNumForT - 1 ? chunkLenTail : chunkSize;
+        result.curBatchId = loopIdx / chunkNumForT;
     }
 };
 
@@ -93,7 +95,7 @@ struct VariableLengthStrategy {
         chunkIndicesGm.SetGlobalBuffer((__gm__ int64_t *)chunkIndices_);
     }
 
-    __aicore__ inline IndexResult calculate(int64_t loopIdx) const
+    __aicore__ inline void calculate(int64_t loopIdx, IndexResult& result) const
     {
         int64_t curSeqId = chunkIndicesGm.GetValue(loopIdx * 2);
         int64_t curSeqChunkId = chunkIndicesGm.GetValue(loopIdx * 2 + 1);
@@ -103,7 +105,9 @@ struct VariableLengthStrategy {
         int64_t chunkStartToken = curSeqChunkId * chunkSize;
         int64_t chunkEndToken = chunkStartToken + chunkSize;
         chunkEndToken = chunkEndToken > curSeqT ? curSeqT : chunkEndToken;
-        return IndexResult(0, bos + chunkStartToken, chunkEndToken - chunkStartToken);
+        result.curBatchId = 0;
+        result.curTokenId = bos + chunkStartToken;
+        result.chunkLen = chunkEndToken - chunkStartToken;
     }
 };
 

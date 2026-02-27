@@ -33,11 +33,9 @@ public:
                                 GM_ADDR chunk_indices, GM_ADDR d_v, GM_ADDR workspace,
                                 const ChunkBwdDvLocalTilingData *__restrict tilingData, AscendC::TPipe *pipe = nullptr);
 
-    __aicore__ inline void CopyIn(IndexResult indexResult, int64_t hIndex, int64_t taskStartLine, int64_t taskLineNum);
-
     __aicore__ inline void Process();
 
-    __aicore__ inline void ProcessChunk(IndexResult indexResult);
+    __aicore__ inline void ProcessChunk(const IndexResult& indexResult);
 
 
     AscendC::TPipe *pipe_;
@@ -137,8 +135,9 @@ __aicore__ inline void ChunkBwdDvLocalVector<QKVT, GT, Strategy>::Process()
     AscendC::DataCopyPad(maskLocalTensor, triMatrixGm, copyParams, {false, 0, 0, 0});
     AscendC::Duplicate<float>(zeroFp32LocalTensor, float(0.0), BLOCK_SIZE / SIZE_FLOAT);
     MTE2ToVSync();
+    IndexResult indexResult;
     for (int64_t loopIdx = coreIdx; loopIdx < coreLoops; loopIdx += blockNum) {
-        IndexResult indexResult = strategy.calculate(loopIdx);
+        strategy.calculate(loopIdx, indexResult);
         ProcessChunk(indexResult);
     }
 
@@ -146,7 +145,7 @@ __aicore__ inline void ChunkBwdDvLocalVector<QKVT, GT, Strategy>::Process()
 }
 
 template <typename QKVT, typename GT, typename Strategy>
-__aicore__ inline void ChunkBwdDvLocalVector<QKVT, GT, Strategy>::ProcessChunk(IndexResult indexResult)
+__aicore__ inline void ChunkBwdDvLocalVector<QKVT, GT, Strategy>::ProcessChunk(const IndexResult& indexResult)
 {
     int64_t padNum = strategy.chunkSize - indexResult.chunkLen;
     int64_t taskSplitLine = indexResult.chunkLen / MASK_ALIGN_LINE / NUM_2;

@@ -108,9 +108,10 @@ __aicore__ inline void ChunkBwdDvLocalCube<QKVT, GT, Strategy>::Process()
         auto layoutA = tla::MakeLayout<ElementA, LayoutTagA>(strategy.chunkSize, K);
         auto layoutB = tla::MakeLayout<ElementB, LayoutTagB>(K, strategy.chunkSize);
         auto layoutC = tla::MakeLayout<ElementC, LayoutTagC>(strategy.chunkSize, strategy.chunkSize);
+        IndexResult indexResult;
         for (int64_t loopIdx = coreIdx; loopIdx < coreLoops; loopIdx += blockNum) {
             int64_t curBatchId = static_cast<int64_t>(loopIdx) / strategy.chunkNumForT;
-            IndexResult indexResult = strategy.calculate(loopIdx);
+            strategy.calculate(loopIdx, indexResult);
             Catlass::GemmCoord actualBlockShape{static_cast<uint32_t>(indexResult.chunkLen),
                                                 static_cast<uint32_t>(indexResult.chunkLen), static_cast<uint32_t>(K)};
             for (int hIndex = 0; hIndex < H; hIndex++) {
@@ -157,9 +158,10 @@ __aicore__ inline void ChunkBwdDvLocalCube<QKVT, GT, Strategy>::Process()
         auto layoutA = tla::MakeLayout<ElementA, LayoutTagA>(strategy.chunkSize, strategy.chunkSize);
         auto layoutB = tla::MakeLayout<ElementB, LayoutTagB>(strategy.chunkSize, V);
         auto layoutC = tla::MakeLayout<ElementC, LayoutTagC>(strategy.chunkSize, V);
+        IndexResult indexResult;
         for (int64_t loopIdx = coreIdx; loopIdx < coreLoops; loopIdx += blockNum) {
             int64_t curBatchId = static_cast<int64_t>(loopIdx) / strategy.chunkNumForT;
-            IndexResult indexResult = strategy.calculate(loopIdx);
+            strategy.calculate(loopIdx, indexResult);
             Catlass::GemmCoord actualBlockShape{static_cast<uint32_t>(indexResult.chunkLen), static_cast<uint32_t>(V),
                                                 static_cast<uint32_t>(indexResult.chunkLen)};
             for (int hIndex = 0; hIndex < H; hIndex++) {

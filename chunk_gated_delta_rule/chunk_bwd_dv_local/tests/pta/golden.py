@@ -1,81 +1,11 @@
 import torch
-import torch_npu
 from typing import Optional
 import math
-import hashlib
-from ct import single
-def compare_tensors_by_ratio(tensor1, tensor2, ratio_threshold=0.01, verbose=True):
-    """
-    对比两个tensor，检查差值与tensor1对应点位值的比值是否超过阈值
-    
-    Args:
-        tensor1: 第一个tensor（作为基准）
-        tensor2: 第二个tensor
-        ratio_threshold: 比值阈值，默认0.01（1%）
-        verbose: 是否打印详细结果，默认True
-    
-    Returns:
-        bool: 是否所有点位都通过精度检查
-    """
-    # 检查形状是否相同
-    if tensor1.shape != tensor2.shape:
-        if verbose:
-            print(f"错误: tensor形状不匹配!")
-            print(f"  tensor1 shape: {tensor1.shape}")
-            print(f"  tensor2 shape: {tensor2.shape}")
-        return False
-    
-    # 计算绝对差值
-    diff = torch.abs(tensor1 - tensor2)
-    
-    # 计算比值：差值 / (|tensor1| + epsilon)，避免除以0
-    epsilon = 1e-8  # 小值避免除以0
-    ratio = diff / (torch.abs(tensor1) + epsilon)
-    
-    # 找出超过阈值的点位
-    mask = ratio > ratio_threshold
-    failed_count = torch.sum(mask).item()
-    total_count = tensor1.numel()
-    
-    if failed_count == 0:
-        if verbose:
-            print(f"✓ 精度对比成功!")
-            print(f"  总点数: {total_count}")
-            print(f"  最大相对差: {ratio.max().item():.6f}")
-            print(f"  平均相对差: {ratio.mean().item():.6f}")
-            print(f"  最大绝对差值: {diff.max().item():.6f}")
-        return True
-    else:
-        if verbose:
-            print(f"✗ 精度对比失败!")
-            print(f"  总点数: {total_count}")
-            print(f"  失败点数: {failed_count} ({failed_count/total_count*100:.2f}%)")
-            print(f"  最大相对差: {ratio.max().item():.6f}")
-            print(f"  平均相对差: {ratio.mean().item():.6f}")
-            print(f"  最大绝对差值: {diff.max().item():.6f}")
-            
-            # 打印部分失败点位
-            print(f"\n失败点位示例 (最多显示10个):")
-            failed_indices = torch.nonzero(mask, as_tuple=True)
-            display_count = min(10, failed_count)
-            
-            for i in range(display_count):
-                idx = tuple(dim[i].item() for dim in failed_indices)
-                val1 = tensor1[idx].item()
-                val2 = tensor2[idx].item()
-                val_diff = diff[idx].item()
-                val_ratio = ratio[idx].item()
-                print(f"  位置{idx}:")
-                print(f"    tensor1={val1:.6f}, tensor2={val2:.6f}")
-                print(f"    差值={val_diff:.6f}, 比值={val_ratio:.6f} ({val_ratio*100:.2f}%)")
-        
-        return False
+
 def prepare_lens(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
     return cu_seqlens[1:] - cu_seqlens[:-1]
 
-def cdiv(a: torch.LongTensor
-    , b : int):
-    torch.empty
+def cdiv(a: torch.LongTensor, b: int):
     return (a + b - 1) // b
 
 def prepare_chunk_indices(
@@ -83,9 +13,6 @@ def prepare_chunk_indices(
     chunk_size: int
 ) -> torch.LongTensor:
     indices = torch.cat([torch.arange(n) for n in cdiv(prepare_lens(cu_seqlens), chunk_size).tolist()])
-    # print("cu_seqlens is ", cu_seqlens)
-    # print("indices is ", indices)
-
     return torch.stack([indices.eq(0).cumsum(0) - 1, indices], 1).to(cu_seqlens)
 
 def chunk_bwd_dv_local_fix(
@@ -132,7 +59,6 @@ def chunk_bwd_dv_local_fix(
                     b_A[:chunk_len, :chunk_len] += matmul_result
                 else:
                     b_A[:chunk_len, :chunk_len] += torch.matmul(b_k, b_q)# [BT,BT]
-                    # print(" golden k * q^T = ",b_A[:chunk_len, :chunk_len])
             b_g = g_t[batch_idx, i_h, chunk_start_token:chunk_start_token+chunk_len] # g_t [B, H, T_max] → b_g [chunk_len]
             o_t = i_t * BT + torch.arange(0, BT) # [BT] chunk内的token序号
             m_t = o_t < T # [BT] bool掩码：是否是有效token
@@ -143,16 +69,13 @@ def chunk_bwd_dv_local_fix(
             valid_mask = m_t_col & m_t  #  [BT, BT] 有效掩码：只保留有效token的位置，左上角是[有效token,有效token]大小的全1
             # 组合掩码
             m_A = pos_mask & valid_mask  # [BT, BT]
-            g_i = b_g.unsqueeze(1)  # [chunk_len, 1]
+            g_i = b_g.unsqueeze(1)   # [chunk_len, 1]
             g_j = b_g.unsqueeze(0)  # [1, chunk_len]
             g_factor = torch.exp(g_j - g_i)  * scale  # [chunk_len, chunk_len]
-            # print(" g_factor = ",g_factor)
-            # print(" golden g_factor = ",g_factor)
             b_A_gated = torch.zeros_like(b_A)
             b_A_gated[:chunk_len, :chunk_len] = b_A[:chunk_len, :chunk_len] * g_factor # [BT, BT] 门控缩放后的注意力核矩阵
             # 应用掩码
             b_A_masked = torch.where(m_A, b_A_gated, torch.zeros_like(b_A_gated)) # 只保留掩码为 True 的位置的 b_A_gated 值，其余置 0
-            # print(" golden b_A_masked = ",b_A_masked[:chunk_len, :chunk_len])
             b_A_masked = b_A_masked.to(torch.float32) # [BT, BT]
             BV = 128  # 与Triton保持一致
             BV = min(BV, V)  # 确保不超过V
@@ -161,7 +84,6 @@ def chunk_bwd_dv_local_fix(
                 v_width = v_end - i_v
                 b_do = do[batch_idx, i_h, chunk_start_token:chunk_start_token+chunk_len, i_v:v_end].to(torch.float32) # do [B, T_max, H, V] → b_do [chunk_len, BV]
                 b_dv = torch.matmul(b_A_masked[:chunk_len, :chunk_len], b_do) # b_A_masked 这个 [BT, BT] 的矩阵，只有左上角 [chunk_len, chunk_len] 区域有非 0 值，其余所有区域全是 0
-                # print(" golden b_dv = ",b_dv)
                 dv[batch_idx, i_h, chunk_start_token:chunk_start_token+chunk_len, i_v:v_end] += b_dv
     return dv
 
@@ -183,8 +105,6 @@ def chunk_bwd_dv_local_variable(
     chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
     chunk_indices = chunk_indices.view(-1)
     BT = min(chunk_size, max(16, 2 ** math.ceil(math.log2(T)))) # 有风险，T至少要>=64,否则会计算错误
-    # print("T = ",T)
-    # print("BT = ",BT)
     NT = len(chunk_indices) // 2 
     dv = torch.zeros_like(do).to(torch.float32)
     g_t = g
@@ -214,13 +134,12 @@ def chunk_bwd_dv_local_variable(
                     b_A[:chunk_len, :chunk_len] += matmul_result
                 else:
                     b_A[:chunk_len, :chunk_len] += torch.matmul(b_k, b_q)# [BT,BT]
-                    # print(" golden k * q^T = ",b_A)
             b_g = g_t[batch_idx, i_h, global_start:global_start+chunk_len] # g_t [B, H, T_max] → b_g [chunk_len]
             o_t = i_t * BT + torch.arange(0, BT) # [BT] chunk内的token序号
             m_t = o_t < T # [BT] bool掩码：是否是有效token
             o_t_col = o_t.unsqueeze(1)  # [BT, 1]
             o_t_row = o_t.unsqueeze(0)  # [1, BT]
-            pos_mask = o_t_col <= o_t_row  # [BT, BT] 上三角矩阵：只允许当前token看<=自己的token（因果掩码）
+            pos_mask = o_t_col <= o_t_row   # [BT, BT] 上三角矩阵：只允许当前token看<=自己的token（因果掩码）
             m_t_col = m_t.unsqueeze(1)  # [BT, 1]
             valid_mask = m_t_col & m_t  #  [BT, BT] 有效掩码：只保留有效token的位置，左上角是[有效token,有效token]大小的全1
             # 组合掩码
@@ -228,12 +147,10 @@ def chunk_bwd_dv_local_variable(
             g_i = b_g.unsqueeze(1)  # [chunk_len, 1]
             g_j = b_g.unsqueeze(0)  # [1, chunk_len]
             g_factor = torch.exp(g_j - g_i)  * scale  # [chunk_len, chunk_len]
-            # print(" golden g_factor = ",g_factor)
             b_A_gated = torch.zeros_like(b_A)
             b_A_gated[:chunk_len, :chunk_len] = b_A[:chunk_len, :chunk_len] * g_factor # [BT, BT] 门控缩放后的注意力核矩阵
             # 应用掩码
             b_A_masked = torch.where(m_A, b_A_gated, torch.zeros_like(b_A_gated)) # 只保留掩码为 True 的位置的 b_A_gated 值，其余置 0
-            # print(" golden b_A_masked = ",b_A_masked)
             b_A_masked = b_A_masked.to(torch.float32) # [BT, BT]
             BV = 128  # 与Triton保持一致
             BV = min(BV, V)  # 确保不超过V
@@ -242,145 +159,5 @@ def chunk_bwd_dv_local_variable(
                 v_width = v_end - i_v
                 b_do = do[batch_idx, i_h, global_start:global_start+chunk_len, i_v:v_end].to(torch.float32) # do [B, T_max, H, V] → b_do [chunk_len, BV]
                 b_dv = torch.matmul(b_A_masked[:chunk_len, :chunk_len], b_do) # b_A_masked 这个 [BT, BT] 的矩阵，只有左上角 [chunk_len, chunk_len] 区域有非 0 值，其余所有区域全是 0
-                # print(" golden b_dv = ",b_dv)
                 dv[batch_idx, i_h, global_start:global_start+chunk_len, i_v:v_end] += b_dv
     return dv
-
-def create_incremental_tensor(shape, dtype=torch.float16, start=1, step=1):
-    total_elements = 1
-    for dim in shape:
-        total_elements *= dim
-    tensor = torch.arange(
-        start, 
-        start + total_elements * step, 
-        step, 
-        dtype=dtype
-    ).reshape(shape)
-    return tensor
-
-def create_tensor(shape, dtype=torch.float16):
-
-    # return create_incremental_tensor(shape,dtype)
-    # return torch.ones(shape, dtype=dtype)
-    return torch.rand(shape, dtype=dtype)
-
-def bool_matrix_to_uint8(chunk_size):
-    # 创建反上三角矩阵（上三角为0，下三角为1）
-    bool_matrix = torch.triu(torch.ones(chunk_size, chunk_size, dtype=torch.bool))
-    bool_matrix = ~bool_matrix
-    # print(f"==== bool_matrix.shape = {bool_matrix.shape} ",bool_matrix)
-    # 将bool矩阵转换为uint8 (0或1)
-    uint8_matrix = bool_matrix.to(torch.uint8)
-    # 重塑为 (chunk_size, chunk_size//8, 8) 以便每8个bit打包
-    reshaped = uint8_matrix.reshape(chunk_size, chunk_size // 8, 8)
-    # 将每8个bit打包成一个uint8
-    # bit0 * 1 + bit1 * 2 + bit2 * 4 + ... + bit7 * 128
-    powers = torch.tensor([1,2,4,8,16,32,64,128], dtype=torch.uint8)
-    packed = (reshaped * powers).sum(dim=-1).to(torch.uint8)
-    return packed
-
-def get_tensor_md5(tensor):
-    tensor_np = tensor.cpu().numpy()
-    md5_hash = hashlib.md5(tensor_np.tobytes()).hexdigest()
-    return md5_hash
-
-def compare_tensors_md5(tensor1, tensor2):
-    md5_1 = get_tensor_md5(tensor1)
-    md5_2 = get_tensor_md5(tensor2)
-    
-    return md5_1, md5_2, md5_1 == md5_2
-
-def test_variable():
-    B, H, T, K, V = 1, 32, 32768, 128, 128
-    chunk_size=128
-    scale = 2.0
-
-    q = create_tensor((B, H, T, K), dtype=torch.float16)
-    print(f"==== q.shape = {q.shape} ")
-    k = create_tensor((B, H, T, K), dtype=torch.float16)
-    print(f"==== k.shape = {k.shape} ")
-    d_o = create_tensor((B, H, T, V), dtype=torch.float16)
-    print(f"==== d_o.shape = {d_o.shape} ")
-    g = create_tensor((B, H, T), dtype=torch.float16)
-    print(f"==== g.shape = {g.shape} ")
-    # print("q =",q)
-    # print("k =",k)
-    # print("d_o =",d_o)
-    # print("g =",g)
-    upper_tri_matrix = bool_matrix_to_uint8(chunk_size)
-    # upper_tri_matrix = ~upper_tri_matrix
-    # print(f"==== upper_tri_matrix.shape = {upper_tri_matrix.shape} ",upper_tri_matrix)
-    
-    cu_seqlens = q.new_tensor([0, 32768], dtype=torch.long)
-    chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size)
-
-    # dv_golden = chunk_bwd_dv_local_variable(q, k, d_o, g, scale, cu_seqlens, chunk_size)
-
-    q_npu = q.npu()
-    k_npu = k.npu()
-    d_o_npu = d_o.npu()
-    g_npu = g.npu()
-    upper_tri_matrix_npu = upper_tri_matrix.npu()
-    if cu_seqlens is not None:
-        cu_seqlens_npu = cu_seqlens.npu()
-        chunk_indices_npu = chunk_indices.npu()
-
-    dv = torch_npu.npu_chunk_bwd_dv_local(q_npu, k_npu, d_o_npu, g_npu,upper_tri_matrix=upper_tri_matrix_npu, g_gamma=None, A=None,cu_seqlens=cu_seqlens_npu, chunk_indices = chunk_indices_npu, scale=scale, chunk_size =chunk_size)
-    # torch.save(dv.cpu(),"dv_pre.pt")
-    
-    # torch.save(dv.cpu(),"dv.pt")
-    # torch.save(dv_golden,"dv_golden.pt")
-
-    # dv_golden = torch.load("dv_golden.pt")
-    # compare_tensors_by_ratio(dv_golden,dv.cpu())
-
-    # dv_pre = torch.load("dv_pre.pt")
-    # md5_1, md5_2, is_equal = compare_tensors_md5(dv_pre, dv.cpu())
-    # print(f"dv_pre  Shape: {dv_pre.shape}")
-    # print(f"  MD5: {md5_1}")
-    # print(f"dv  Shape: {dv.shape}")
-    # print(f"  MD5: {md5_2}")
-    # print(f"\nMD5对比结果: {'相同' if is_equal else '不同'}")
-
-def test_fix():
-    B, H, T, K, V = 256, 32, 128, 128, 128
-    chunk_size=128
-    scale = 12.0
-
-    q = create_tensor((B, H, T, K), dtype=torch.float16)
-    print(f"==== q.shape = {q.shape} ")
-    k = create_tensor((B, H, T, K), dtype=torch.float16)
-    print(f"==== k.shape = {k.shape} ")
-    d_o = create_tensor((B, H, T, V), dtype=torch.float16)
-    print(f"==== d_o.shape = {d_o.shape} ")
-    g = create_tensor((B, H, T), dtype=torch.float16)
-    print(f"==== g.shape = {g.shape} ")
-    # print("q =",q)
-    # print("k =",k)
-    # print("d_o =",d_o)
-    # print("g =",g)
-    upper_tri_matrix = bool_matrix_to_uint8(chunk_size)
-    # print(f"==== upper_tri_matrix.shape = {upper_tri_matrix.shape} ")
-    cu_seqlens = None
-    # dv_golden =  chunk_bwd_dv_local_fix(q, k, d_o, g, scale, cu_seqlens, chunk_size)
-    # print(f"==== dv_golden.shape = {dv_golden.shape} ",dv_golden)
-
-    q_npu = q.npu()
-    k_npu = k.npu()
-    d_o_npu = d_o.npu()
-    g_npu = g.npu()
-    upper_tri_matrix_npu = upper_tri_matrix.npu()
-    dv = torch_npu.npu_chunk_bwd_dv_local(q_npu, k_npu, d_o_npu, g_npu,upper_tri_matrix=upper_tri_matrix_npu, g_gamma=None, A=None,cu_seqlens=None, chunk_indices = None, scale=scale, chunk_size =chunk_size)
-    # torch.save(dv.cpu(),"dv.pt")
-    # torch.save(dv_golden,"dv_golden.pt")
-    # compare_tensors_by_ratio(dv_golden,dv.cpu())
-    # single(dv.cpu(),dv_golden)
-
-if __name__ == "__main__":
-    torch.manual_seed(0)
-    
-    test_variable()
-    # test_fix()
-
-    
-
