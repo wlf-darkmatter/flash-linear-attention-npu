@@ -101,6 +101,24 @@ struct EpilogueAtlasA2Gemm {
 struct EpilogueAtlasA2Gemv {
     using ArchTag = Arch::AtlasA2;
 };
+
+struct EpilogueAtlasA2GDNFwdHVnew {
+    using ArchTag = Arch::AtlasA2;
+};
+
+struct EpilogueAtlasA2GDNFwdHUpdate {
+    using ArchTag = Arch::AtlasA2;
+};
+
+// For AtlasA2, GDN FwdO QKmask
+struct EpilogueAtlasA2GDNFwdOQkmask {
+    using ArchTag = Arch::AtlasA2;
+};
+
+// For AtlasA2, GDN FwdO Output
+struct EpilogueAtlasA2GDNFwdOOutput {
+    using ArchTag = Arch::AtlasA2;
+};
 ///////////////////////////
 }  // namespace Catlass::Epilogue
 
