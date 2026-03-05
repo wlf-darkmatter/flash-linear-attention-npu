@@ -9,7 +9,7 @@
 # -----------------------------------------------------------------------------------------------------------
 
 if (BUILD_OPEN_PROJECT)
-    target_sources(op_host_aclnn PRIVATE
+    target_sources(op_host_aclnnExc PRIVATE
         chunk_gated_delta_rule_bwd_dhu_def.cpp
     )
     add_ops_compile_options(
@@ -37,5 +37,5 @@ if("${CONDITION_UNIT}" STREQUAL "ascend910_95")
     )
 endif()
 
-add_modules_sources(OPTYPE chunk_gated_delta_rule_bwd_dhu ACLNNTYPE aclnn)
+add_modules_sources(OPTYPE chunk_gated_delta_rule_bwd_dhu ACLNNTYPE aclnn_exclude)
 
