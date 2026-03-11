@@ -8,9 +8,6 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#ifndef CATLASS_GEMM_KERNEL_GDN_FWD_O_KERNEL_HPP
-#define CATLASS_GEMM_KERNEL_GDN_FWD_O_KERNEL_HPP
-
 #include "catlass/arch/arch.hpp"
 #include "catlass/arch/cross_core_sync.hpp"
 #include "catlass/arch/resource.hpp"
@@ -29,6 +26,7 @@
 #include "kernel_operator.h"
 using namespace Catlass;
 
+// template <>
 namespace Catlass::Gemm::Kernel {
 
 template<
@@ -44,18 +42,17 @@ class GDNFwdOKernel {
 public:
     
     using ArchTag = Arch::AtlasA2;
-
     using GDNFwdOOffsets = Catlass::Gemm::Block::GDNFwdOOffsets;
 
     using ElementQ = typename BlockMmadQK::ElementA;
     using LayoutQ = typename BlockMmadQK::LayoutA;
 
-    using ElementK = typename BlockMmadQK::ElementB;
+    using ElementK =  typename BlockMmadQK::ElementB;
     using LayoutK = typename BlockMmadQK::LayoutB;
 
     using ElementAtten = typename BlockMmadQK::ElementC;
     using LayoutAtten = typename BlockMmadQK::LayoutC;
-
+    
     using ElementAttenMasked = typename BlockMmadQH::ElementA;
     using LayoutAttenMasked = typename BlockMmadQH::LayoutA;
 
@@ -65,14 +62,17 @@ public:
     using ElementOinter = typename BlockMmadQH::ElementC;
     using LayoutOinter = typename BlockMmadQH::LayoutC;
 
-    using ElementVNEW = typename BlockMmadAttenVNEW::ElementB;
+
+    using ElementVNEW = typename BlockMmadAttenVNEW::ElementB; 
     using LayoutVNEW = typename BlockMmadAttenVNEW::LayoutB;
+
 
     using ElementA = half;
     using ElementG = float;
+    using ElementMask = bool;
 
     using L1TileShape = typename BlockMmadQK::L1TileShape;
-    
+
     uint32_t shapeBatch;
     uint32_t seqlen;
     uint32_t kNumHead;
@@ -88,6 +88,7 @@ public:
     uint32_t hWorkspaceOffset;
     uint32_t attnWorkspaceOffset;
     uint32_t aftermaskWorkspaceOffset;
+    uint32_t maskWorkspaceOffset;
     
     AscendC::GlobalTensor<ElementQ> gmQ;
     AscendC::GlobalTensor<ElementK> gmK;
@@ -99,17 +100,17 @@ public:
     AscendC::GlobalTensor<ElementOinter> gmHWorkspace;
     AscendC::GlobalTensor<ElementAtten> gmAttnWorkspace;
     AscendC::GlobalTensor<ElementAttenMasked> gmAftermaskWorkspace;
-    
+    AscendC::GlobalTensor<ElementMask> gmMask;
+
     CubeScheduler cubeBlockScheduler;
     VecScheduler vecBlockScheduler;
 
     Arch::Resource<ArchTag> resource;
 
-
     __aicore__ inline GDNFwdOKernel() {}
 
-    __aicore__ inline void Init(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR h, GM_ADDR g,
-                                GM_ADDR cu_seqlens, GM_ADDR chunk_offsets, GM_ADDR o, GM_ADDR tiling, GM_ADDR user) {
+    __aicore__ inline void Init(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR h, GM_ADDR g, 
+        GM_ADDR cu_seqlens, GM_ADDR chunk_offsets, GM_ADDR o, GM_ADDR tiling, GM_ADDR user) {
         
         __gm__ ChunkFwdOTilingData *__restrict gdnFwdOTilingData = reinterpret_cast<__gm__ ChunkFwdOTilingData *__restrict>(tiling);
 
@@ -127,7 +128,8 @@ public:
         hWorkspaceOffset = gdnFwdOTilingData->hWorkspaceOffset;
         attnWorkspaceOffset = gdnFwdOTilingData->attnWorkspaceOffset;
         aftermaskWorkspaceOffset = gdnFwdOTilingData->aftermaskWorkspaceOffset;
-        
+        maskWorkspaceOffset = gdnFwdOTilingData->maskWorkspaceOffset;
+
         gmQ.SetGlobalBuffer((__gm__ ElementQ *)q);
         gmK.SetGlobalBuffer((__gm__ ElementK *)k);
         gmV.SetGlobalBuffer((__gm__ ElementVNEW *)v);
@@ -138,6 +140,7 @@ public:
         gmHWorkspace.SetGlobalBuffer((__gm__ ElementOinter *)(user + hWorkspaceOffset));
         gmAttnWorkspace.SetGlobalBuffer((__gm__ ElementAtten *)(user + attnWorkspaceOffset));
         gmAftermaskWorkspace.SetGlobalBuffer((__gm__ ElementAttenMasked *)(user + aftermaskWorkspaceOffset));
+        gmMask.SetGlobalBuffer((__gm__ ElementMask *)(user + maskWorkspaceOffset));
 
         if ASCEND_IS_AIC {
             cubeBlockScheduler.Init(cu_seqlens, chunk_offsets, tiling);
@@ -147,113 +150,155 @@ public:
             vecBlockScheduler.Init(cu_seqlens, chunk_offsets, tiling);
         }
     }
-    
-    __aicore__ inline void Process() {
 
+    __aicore__ inline void Process() {
         if ASCEND_IS_AIC {
             uint32_t coreIdx = AscendC::GetBlockIdx();
             uint32_t coreNum = AscendC::GetBlockNum();
 
-            LayoutQ qLayout {shapeBatch * kNumHead * seqlen, kHeadDim};
-            LayoutK kLayout {kHeadDim, shapeBatch * kNumHead * seqlen}; 
-            LayoutH hLayout {shapeBatch * vNumHead * seqlen * kHeadDim, vHeadDim};
-            LayoutOinter ointerLayout {coreNum * chunkSize, vHeadDim};
-            LayoutVNEW vnewLayout {shapeBatch * vNumHead * seqlen, vHeadDim};
+            BlockMmadQK blockMmadQK(resource);
+            BlockMmadQH blockMmadQH(resource);
+            BlockMmadAttenVNEW blockMmadAttenVNEW(resource);
+
+            LayoutQ qLayout{shapeBatch * kNumHead * seqlen, kHeadDim};  
+            LayoutK  kLayout{kHeadDim, shapeBatch * kNumHead * seqlen};
+            LayoutH  hLayout{shapeBatch * vNumHead * seqlen * kHeadDim, vHeadDim};
+            LayoutOinter ointerLayout{coreNum * chunkSize * PING_PONG_STAGES, vHeadDim};
+            LayoutVNEW  vnewLayout{shapeBatch * vNumHead * seqlen, vHeadDim};
+
+            bool needRun = false;
+            bool isFirstC3 = true;
 
             while (cubeBlockScheduler.isRunning) {
                 cubeBlockScheduler.InitTask();
-                
-                if (coreIdx < coreNum) {
-                    Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done);
-                    GDNFwdOOffsets& cube1Offsets = cubeBlockScheduler.GetCube1Offsets();
-                    int64_t cube1OffsetQ = cube1Offsets.qkOffset;
-                    int64_t cube1OffsetK = cube1Offsets.qkOffset;
-                    int64_t cube1OffsetAttn = cube1Offsets.attnWorkOffset;
-                    LayoutAtten attenLayout {coreNum * chunkSize * PING_PONG_STAGES, cube1Offsets.blockTokens};
 
+                if (cubeBlockScheduler.isRunning && coreIdx < coreNum) {
+
+                    Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done);
+
+                    GDNFwdOOffsets& cube1Offsets = cubeBlockScheduler.GetCube1Offsets();
+                    int64_t cube1OffsetQ = cube1Offsets.qkOffset; 
+                    int64_t cube1OffsetK = cube1Offsets.qkOffset; 
+                    int64_t cube1OffsetAttn = cube1Offsets.attnWorkOffset; 
+                    LayoutAtten attenLayout{coreNum * chunkSize * PING_PONG_STAGES, cube1Offsets.blockTokens}; 
                     GemmCoord cube1Shape{cube1Offsets.blockTokens, cube1Offsets.blockTokens, kHeadDim};
-                    BlockMmadQK blockMmadQK(resource);
-                    blockMmadQK(
-                        gmQ[cube1OffsetQ], qLayout,
-                        gmK[cube1OffsetK], kLayout,
-                        gmAttnWorkspace[cube1OffsetAttn], attenLayout,
-                        cube1Shape
-                    );
+                    blockMmadQK.preSetFlags();
+                    blockMmadQK(gmQ[cube1OffsetQ], qLayout,
+                            gmK[cube1OffsetK],  kLayout,
+                            gmAttnWorkspace[cube1OffsetAttn],  attenLayout,
+                            cube1Shape);
+                    blockMmadQK.finalWaitFlags();
                     Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(cubeBlockScheduler.cube1Done);
+
                 }
 
-                if (coreIdx < coreNum) {
+                // AscendC::PipeBarrier<PIPE_ALL>();
+
+                if (needRun && coreIdx < coreNum) {
+
+
+                    if(!cubeBlockScheduler.isRunning) Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done);
+
+                    Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done);
+
                     GDNFwdOOffsets& cube2Offsets = cubeBlockScheduler.GetCube23Offsets();
                     int64_t cube2OffsetQ = cube2Offsets.qkOffset;
                     int64_t cube2OffsetH = cube2Offsets.hOffset;
-                    int64_t cube2OffsetHWork = cube2Offsets.hvWorkOffset;
+                    int64_t cube2OffsetHWork = cube2Offsets.hvWorkOffset; 
                     GemmCoord cube2Shape{cube2Offsets.blockTokens, vHeadDim, kHeadDim};
-                    BlockMmadQH blockMmadQH(resource);
-                    blockMmadQH(
-                        gmQ[cube2OffsetQ], qLayout,
-                        gmH[cube2OffsetH], hLayout,
-                        gmHWorkspace[cube2OffsetHWork], ointerLayout,
-                        cube2Shape
-                    );
+                    blockMmadQH.preSetFlags();
+                    blockMmadQH(gmQ[cube2OffsetQ], qLayout,
+                            gmH[cube2OffsetH],  hLayout,
+                            gmHWorkspace[cube2OffsetHWork],  ointerLayout,
+                            cube2Shape);
+                    blockMmadQH.finalWaitFlags();
                     Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(cubeBlockScheduler.cube2Done);
                 }
 
-                if (coreIdx < coreNum) {
-                    Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done);
-                    GDNFwdOOffsets& cube3Offsets = cubeBlockScheduler.GetCube23Offsets();
-                    int64_t cube3OffsetAttnMask = cube3Offsets.attnWorkOffset;
-                    int64_t cube3OffsetV = cube3Offsets.ovOffset;
-                    int64_t cube3OffsetVWork = cube3Offsets.hvWorkOffset;
-                    LayoutAtten attenLayout {coreNum * chunkSize * PING_PONG_STAGES, cube3Offsets.blockTokens};
+                // AscendC::PipeBarrier<PIPE_ALL>();
 
+                if (needRun && coreIdx < coreNum) {
+
+                
+                    GDNFwdOOffsets& cube3Offsets = cubeBlockScheduler.GetCube23Offsets();
+
+                    if(isFirstC3) Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done);
+
+                    int64_t cube3OffsetAttnMask = cube3Offsets.attnWorkOffset; 
+                    int64_t cube3OffsetV = cube3Offsets.ovOffset; 
+                    int64_t cube3OffsetVWork = cube3Offsets.hvWorkOffset; 
+                    LayoutAtten attenLayout{coreNum * chunkSize * PING_PONG_STAGES, cube3Offsets.blockTokens}; 
                     GemmCoord cube3Shape{cube3Offsets.blockTokens, vHeadDim, cube3Offsets.blockTokens};
-                    BlockMmadAttenVNEW blockMmadAttenVNEW(resource);
-                    blockMmadAttenVNEW(
-                        gmAftermaskWorkspace[cube3OffsetAttnMask], attenLayout,
-                        gmV[cube3OffsetV], vnewLayout,
-                        gmVWorkspace[cube3OffsetVWork], ointerLayout,
-                        cube3Shape
-                    );
+                    blockMmadAttenVNEW.preSetFlags();
+                    blockMmadAttenVNEW(gmAftermaskWorkspace[cube3OffsetAttnMask], attenLayout,
+                            gmV[cube3OffsetV],  vnewLayout,
+                            gmVWorkspace[cube3OffsetVWork],  ointerLayout,
+                            cube3Shape);
+                    blockMmadAttenVNEW.finalWaitFlags();
                     Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(cubeBlockScheduler.cube3Done);
+                    isFirstC3 = false;
                 }
+                needRun = true;
+
+                // AscendC::PipeBarrier<PIPE_ALL>();
             }
             if (coreIdx < coreNum) {
                 Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec2Done);
+
             }
         }
 
-
         if ASCEND_IS_AIV {
+
             uint32_t coreIdx = AscendC::GetBlockIdx();
             uint32_t coreNum = AscendC::GetBlockNum();
             uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
             uint32_t subBlockNum = AscendC::GetSubBlockNum();
 
+            AscendC::LocalTensor<half> maskUbTensor = resource.ubBuf.template GetBufferByByte<half>(0);
+            for(uint32_t i = 0; i < chunkSize; ++i)
+            {
+                for(uint32_t j = 0 ; j < chunkSize; ++j)
+                {
+                    if(i>=j) maskUbTensor.SetValue(i*chunkSize+j, (half)1.0);
+                    else maskUbTensor.SetValue(i*chunkSize+j, (half)0.0); 
+                    // maskUbTensor.SetValue(i*chunkSize+j, (half)0.0);
+                }
+            }
+            AscendC::PipeBarrier<PIPE_ALL>();
+
+            bool needRun = false;
+
             if (coreIdx < coreNum * subBlockNum) {
+
+                Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec1Done);
+                Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec1Done);
                 Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done);
+
+
             }
 
             while (vecBlockScheduler.isRunning) {
                 vecBlockScheduler.InitTask();
 
-                if (coreIdx < coreNum * subBlockNum) {
+                if (vecBlockScheduler.isRunning && coreIdx < coreNum * subBlockNum) {
                     Arch::CrossCoreWaitFlag(vecBlockScheduler.cube1Done);
                     GDNFwdOOffsets& vec1Offsets = vecBlockScheduler.GetVec1Offsets();
                     int64_t vec1OffsetAttnMask = vec1Offsets.attnWorkOffset;
                     int64_t vec1OffsetG = vec1Offsets.gOffset;
                     int64_t vec1OffsetAttn = vec1Offsets.attnWorkOffset;
-
                     EpilogueGDNFwdOQkmask epilogueGDNFwdOQkmask(resource);
                     epilogueGDNFwdOQkmask(
                         gmAftermaskWorkspace[vec1OffsetAttnMask], 
-                        gmG[vec1OffsetG], gmAttnWorkspace[vec1OffsetAttn], 
-                        vec1Offsets.blockTokens, kHeadDim, vHeadDim
+                        gmG[vec1OffsetG], gmAttnWorkspace[vec1OffsetAttn], gmMask,
+                        chunkSize, vec1Offsets.blockTokens, kHeadDim, vHeadDim
                     );
-                    AscendC::PipeBarrier<PIPE_ALL>();
                     Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec1Done);
                 }
 
-                if (coreIdx < coreNum * subBlockNum) {
+                AscendC::PipeBarrier<PIPE_ALL>();
+
+                if (needRun && coreIdx < coreNum * subBlockNum) {
                     Arch::CrossCoreWaitFlag(vecBlockScheduler.cube2Done);
                     Arch::CrossCoreWaitFlag(vecBlockScheduler.cube3Done);
                     GDNFwdOOffsets& vec2Offsets = vecBlockScheduler.GetVec2Offsets();
@@ -261,22 +306,22 @@ public:
                     int64_t vec2OffsetG = vec2Offsets.gOffset;
                     int64_t vec2OffsetVWork = vec2Offsets.hvWorkOffset;
                     int64_t vec2OffsetHWork = vec2Offsets.hvWorkOffset;
-
                     EpilogueGDNFwdOOutput epilogueGDNFwdOOutput(resource);
                     epilogueGDNFwdOOutput(
                         gmO[vec2OffsetO], 
-                        gmG[vec2OffsetG], gmVWorkspace[vec2OffsetVWork], gmHWorkspace[vec2OffsetHWork],
+                        gmG[vec2OffsetG], gmVWorkspace[vec2OffsetVWork], gmHWorkspace[vec2OffsetHWork], 
                         scale, vec2Offsets.blockTokens, kHeadDim, vHeadDim
                     );
-                    AscendC::PipeBarrier<PIPE_ALL>();
                     Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done);
                 }
+                
+                AscendC::PipeBarrier<PIPE_ALL>();
+
+                needRun = true;
             }
         }
     }
+    
+};
 
-}; // class GDNFwdOKernel
-
-} // namespace Catlass::Gemm::Kernel
-
-#endif // CATLASS_GEMM_KERNEL_GDN_FWD_O_KERNEL_HPP
+}

@@ -156,37 +156,40 @@ public:
                 } else {
                     Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done);
                 }
-                int64_t cube1OffsetW = cube1Offsets.wOffset;
-                int64_t cube1OffsetH = cube1Offsets.hSrcOffset;
-                int64_t cube1OffsetVwork = cube1Offsets.vWorkOffset;
-                GemmCoord cube1Shape{cube1Offsets.blockTokens, vHeadDim, kHeadDim};
-                blockMmadWH.preSetFlags();
-                blockMmadWH(
-                    gmW[cube1OffsetW], wLayout,
-                    gmH[cube1OffsetH], hLayout,
-                    gmVWorkspaceHalf[cube1OffsetVwork], vLayout,
-                    cube1Shape
-                );
-                blockMmadWH.finalWaitFlags();
+                if (!cube1Offsets.isDummyHead) {
+                    int64_t cube1OffsetW = cube1Offsets.wOffset;
+                    int64_t cube1OffsetH = cube1Offsets.hSrcOffset;
+                    int64_t cube1OffsetVwork = cube1Offsets.vWorkOffset;
+                    GemmCoord cube1Shape{cube1Offsets.blockTokens, vHeadDim, kHeadDim};
+                    blockMmadWH.preSetFlags();
+                    blockMmadWH(
+                        gmW[cube1OffsetW], wLayout,
+                        gmH[cube1OffsetH], hLayout,
+                        gmVWorkspaceHalf[cube1OffsetVwork], vLayout,
+                        cube1Shape
+                    );
+                    blockMmadWH.finalWaitFlags();
+                }
                 Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(cubeBlockScheduler.cube1Done);
 
                 GDNFwdHOffsets& cube2Offsets = cubeBlockScheduler.GetCube2Offsets();
                 if (!cube2Offsets.isFinalState && needRun) {
                     Arch::CrossCoreWaitFlag(cubeBlockScheduler.vec1Done);
                     // step 3: h[i+1] = k.T @ v_work
-                    int64_t cube2OffsetK = cube2Offsets.wkOffset;
-                    int64_t cube2OffsetVwork = cube2Offsets.vWorkOffset;
-                    int64_t cube2OffsetH = cube2Offsets.hWorkOffset;
-                    GemmCoord cube2Shape{kHeadDim, vHeadDim, cube2Offsets.blockTokens};
-                    blockMmadKV.preSetFlags();
-                    blockMmadKV(
-                        gmK[cube2OffsetK], kLayout,
-                        gmVWorkspace[cube2OffsetVwork],  vworkLayout,
-                        gmHWorkspaceHalf[cube2OffsetH],  hLayout,
-                        cube2Shape
-                    );
-                    blockMmadKV.finalWaitFlags();
-            
+                    if (!cube2Offsets.isDummyHead) {
+                        int64_t cube2OffsetK = cube2Offsets.wkOffset;
+                        int64_t cube2OffsetVwork = cube2Offsets.vWorkOffset;
+                        int64_t cube2OffsetH = cube2Offsets.hWorkOffset;
+                        GemmCoord cube2Shape{kHeadDim, vHeadDim, cube2Offsets.blockTokens};
+                        blockMmadKV.preSetFlags();
+                        blockMmadKV(
+                            gmK[cube2OffsetK], kLayout,
+                            gmVWorkspace[cube2OffsetVwork],  vworkLayout,
+                            gmHWorkspaceHalf[cube2OffsetH],  hLayout,
+                            cube2Shape
+                        );
+                        blockMmadKV.finalWaitFlags();
+                    }
                     Arch::CrossCoreSetFlag<0x2, PIPE_FIX>(cubeBlockScheduler.cube2Done);
                 }
                 needRun = true;
@@ -215,24 +218,32 @@ public:
                 // g_buf = gmG[-1] - gmG
                 // g_buf = exp(g_buf)
                 // gmVWorkspace = g_buf * gmV
-                epilogueGDNFwdHVnew(
-                    gmV[vec1Offsets.uvOffset], gmVWorkspace[vec1Offsets.vWorkOffset], 
-                    gmG[vec1Offsets.gOffset], gmU[vec1Offsets.uvOffset], gmVWorkspaceHalf[vec1Offsets.vWorkOffset], 
-                    vec1Offsets.blockTokens, kHeadDim, vHeadDim, vecBlockScheduler.cube1Done
-                );
+                if (!vec1Offsets.isDummyHead) {
+                    epilogueGDNFwdHVnew(
+                        gmV[vec1Offsets.uvOffset], gmVWorkspace[vec1Offsets.vWorkOffset], 
+                        gmG[vec1Offsets.gOffset], gmU[vec1Offsets.uvOffset], gmVWorkspaceHalf[vec1Offsets.vWorkOffset], 
+                        vec1Offsets.blockTokens, kHeadDim, vHeadDim, vecBlockScheduler.cube1Done
+                    );
+                } else {
+                    Arch::CrossCoreWaitFlag(vecBlockScheduler.cube1Done);
+                }
                 Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec1Done);
 
                 GDNFwdHOffsets& vec2Offsets = vecBlockScheduler.GetVec2Offsets();
                 if (!vec2Offsets.isFinalState && needRun) {
                     // step 4:  h[i+1] += h_work if i < num_chunks - 1 else None
-                    EpilogueGDNFwdHUpdate epilogueGDNFwdHUpdate(resource);
-                    epilogueGDNFwdHUpdate(
-                        gmH[vec2Offsets.hDstOffset], 
-                        gmG[vec2Offsets.gOffset], 
-                        gmH[vec2Offsets.hSrcOffset], 
-                        gmHWorkspaceHalf[vec2Offsets.hWorkOffset],
-                        vec2Offsets.blockTokens, kHeadDim, vHeadDim, vecBlockScheduler.cube2Done
-                    );
+                    if (!vec2Offsets.isDummyHead) {
+                        EpilogueGDNFwdHUpdate epilogueGDNFwdHUpdate(resource);
+                        epilogueGDNFwdHUpdate(
+                            gmH[vec2Offsets.hDstOffset],
+                            gmG[vec2Offsets.gOffset],
+                            gmH[vec2Offsets.hSrcOffset],
+                            gmHWorkspaceHalf[vec2Offsets.hWorkOffset],
+                            vec2Offsets.blockTokens, kHeadDim, vHeadDim, vecBlockScheduler.cube2Done
+                        );
+                    } else {
+                        Arch::CrossCoreWaitFlag(vecBlockScheduler.cube2Done);
+                    }
                     Arch::CrossCoreSetFlag<0x2, PIPE_MTE3>(vecBlockScheduler.vec2Done);
                 }
                 needRun = true;
