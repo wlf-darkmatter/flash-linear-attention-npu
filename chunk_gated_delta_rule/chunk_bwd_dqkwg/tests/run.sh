@@ -1,5 +1,5 @@
 # source /root/data_nvme0n1/huangjunzhe/Ascend/ascend-toolkit/set_env.sh
-ascend_path="/data/zs/run/Ascend/cann-9.0.0/"
+ascend_path="/data/huangjunzhe/Ascend/cann-9.0.0/"
 # ascend_path="/data/huangjunzhe/Ascend/cann-9.0.0"
 test_script_path=/data/huangjunzhe/GDN/perf/flash-linear-attention-npu/chunk_gated_delta_rule/chunk_bwd_dqkwg/tests
 export TMPDIR=/data/huangjunzhe/tmp
@@ -41,7 +41,7 @@ if [ "$compi" = "$compi_y" ]; then
         exit 1
     fi
     unset ASCEND_CUSTOM_OPP_PATH
-    bash ${code_path}/build/cann-ops-transformer-custom_linux-aarch64.run # --install-path=${custom_path}
+    bash ${code_path}/build/cann-ops-transformer-custom_linux-aarch64.run #--install-path=${custom_path}
     if [ $? -ne 0 ]; then
         exit 1
     fi
@@ -61,10 +61,11 @@ export LD_LIBRARY_PATH=${ascend_path}/opp/vendors/custom_transformer/op_api/lib/
 # chmod +x test_gdn
 # LD_LIBRARY_PATH=${custom_path}/vendors/custom_transformer/op_api/lib/:${LD_LIBRARY_PATH}
 # ./test_gdn $2
-python3 ${test_script_path}/pta.py
+msprof python3 ${test_script_path}/pta.py
 
 # md5sum /home/huangjunzhe/GDN/data/test/out/*_npu.pt
 
 # conda activate gdn_py39
 # export TORCH_DEVICE_BACKEND_AUTOLOAD=0
 # python3 /root/data_nvme0n1/huangjunzhe/GDN/target/result/to_pt.py /root/data_nvme0n1/huangjunzhe/GDN/target/result/cpu_model
+md5sum /data/huangjunzhe/GDN/data//test/out/*.pt

@@ -25,7 +25,7 @@ constexpr uint64_t CONST_K = 128;
 constexpr uint64_t CONST_V = 128;
 constexpr uint64_t CONST_BT = 64;
 constexpr uint64_t CONST_NUM_CHUNKS = 44;//CONST_T / CONST_BT;  // 32
-
+constexpr int32_t CAL_NUM_FLOAT = 64; // API一次能处理256B，能计算64个float元素
 // Part 1: dw 和 dg_last 计算 (C-V 融合)
 constexpr uint64_t SYNC_PART1_AIC_AIV = 10;  // AIC -> AIV
 constexpr uint64_t SYNC_PART1_AIV_AIC = 11;  // AIV -> AIC

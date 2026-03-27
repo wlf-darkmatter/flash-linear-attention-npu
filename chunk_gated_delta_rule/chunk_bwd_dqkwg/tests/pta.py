@@ -422,7 +422,7 @@ def chunk_bwd_dqkwg_cpu(
 # -------------------------------------------------------------------------
 if __name__ == "__main__":
     RANDOM_DATA = True
-    case_number = 21
+    case_number = 22
     if len(sys.argv) > 1:
         regen = sys.argv[1]
         if regen == "random":
@@ -456,9 +456,9 @@ if __name__ == "__main__":
         [1,32,65536,64,torch.float16,torch.float32,0.0442,torch.tensor([0,16,20000,50000,65536])],
         [1,32,262144,64,torch.bfloat16,torch.bfloat16,0.03125,torch.tensor([0,16,20000,50000,65536,210000,262144])],
         [2,4,512,64,torch.bfloat16,torch.float32,0.088,None],  #21 [0,16,128] [0,16,135,512]
-        [1,32,16384,64,torch.bfloat16,torch.float32,0.088,None],  #21 [0,16,128]
+        [1,32,32768,64,torch.bfloat16,torch.float32,0.088,None],  #21 [0,16,128]
     ]
-    device_id = 4
+    device_id = 5
     
 
     dtype = torch.float16
@@ -499,26 +499,26 @@ if __name__ == "__main__":
     
     test_case_name = "test"
     data_path = "/data/huangjunzhe/GDN/data/"
-    RUN_CPU = True
-    SAVE_FILES = True
+    RUN_CPU = False
+    SAVE_FILES = False
     if SAVE_FILES:
         os.makedirs(f'{data_path}/{test_case_name}/in/', exist_ok=True)
         os.makedirs(f'{data_path}/{test_case_name}/out/', exist_ok=True)
     if RANDOM_DATA:
-        q = torch.randn(B,H,T,K, dtype=dtype, requires_grad=True) * 5e-7 * 100000 # std≈5e-6#torch.randn([B, T, H, K], dtype=dtype)
-        k = torch.randn(B,H,T,K, dtype=dtype, requires_grad=True) * 5e-7 * 100000  # torch.randn([B, T, H, K], dtype=dtype)
-        v = torch.randn(B,H,T,V, dtype=dtype, requires_grad=True) * 5e-7 * 10000  # torch.randn([B, T, H, V], dtype=dtype)
+        q = torch.randn(B,H,T,K, dtype=dtype, requires_grad=True)  # std≈5e-6#torch.randn([B, T, H, K], dtype=dtype)
+        k = torch.randn(B,H,T,K, dtype=dtype, requires_grad=True)   # torch.randn([B, T, H, K], dtype=dtype)
+        v = torch.randn(B,H,T,V, dtype=dtype, requires_grad=True)  # torch.randn([B, T, H, V], dtype=dtype)
 
         # g = torch.randn(B,T,H, dtype=dtype, requires_grad=True) * 5e-2   # torch.randn([B, T, H], dtype=Gtype)
         g = -torch.sort(torch.rand(B*T*H) * 10, descending=False)[0].reshape((B,H,T)).to(Gtype)    #G必须递减且为负数
         # print("g",g)
-        do = torch.randn(B,H,T,V, dtype=dtype, requires_grad=True) * 5e-7 * 100000  # torch.randn([B, T, H, V], dtype=dtype)
+        do = torch.randn(B,H,T,V, dtype=dtype, requires_grad=True)  # torch.randn([B, T, H, V], dtype=dtype)
 
-        dv = torch.randn(B,H,T,V, dtype=dtype, requires_grad=True) * 5e-7 * 1000000  # torch.randn([B, T, H, V], dtype=dtype)
-        w = torch.randn(B,H,T,K, dtype=dtype, requires_grad=True) * 5e-7 * 100000  # torch.randn([B, T, H, K], dtype=dtype)
+        dv = torch.randn(B,H,T,V, dtype=dtype, requires_grad=True)  # torch.randn([B, T, H, V], dtype=dtype)
+        w = torch.randn(B,H,T,K, dtype=dtype, requires_grad=True)   # torch.randn([B, T, H, K], dtype=dtype)
 
-        h = torch.randn(B, H, num_chunks, K, V, dtype=dtype, requires_grad=True) * 5e-7 * 100000  # torch.randn([B, num_chunks, H, K, V], dtype=dtype)
-        dh = torch.randn(B, H, num_chunks, K, V, dtype=dtype, requires_grad=True) * 5e-7 * 1000 # torch.randn([B, num_chunks, H, K, V], dtype=dtype)
+        h = torch.randn(B, H, num_chunks, K, V, dtype=dtype, requires_grad=True)  # torch.randn([B, num_chunks, H, K, V], dtype=dtype)
+        dh = torch.randn(B, H, num_chunks, K, V, dtype=dtype, requires_grad=True)  # torch.randn([B, num_chunks, H, K, V], dtype=dtype)
         if SAVE_FILES:
             torch.save(q, f"{data_path}/{test_case_name}/in/q_cpu.pt")
             torch.save(k, f"{data_path}/{test_case_name}/in/k_cpu.pt")
@@ -548,6 +548,7 @@ if __name__ == "__main__":
         dv=torch.load(f"{data_path}/{test_case_name}/in/dv_cpu.pt", weights_only=False)
         do=torch.load(f"{data_path}/{test_case_name}/in/do_cpu.pt", weights_only=False)
         dh=torch.load(f"{data_path}/{test_case_name}/in/dh_cpu.pt", weights_only=False)
+        print("read input files successfully!")
     q = q.to(dtype).to(calc_type)
     k = k.to(dtype).to(calc_type)
     v = v.to(dtype).to(calc_type)
@@ -649,9 +650,11 @@ if __name__ == "__main__":
                 torch.save(dk,f"{data_path}/{test_case_name}/out/dk_cpu.pt")
                 torch.save(dw,f"{data_path}/{test_case_name}/out/dw_cpu.pt")
                 torch.save(dg,f"{data_path}/{test_case_name}/out/dg_cpu.pt")
+                print(f"cpu files saved to {data_path}/{test_case_name}/out/ .")
+                
 
             torch.save(dq_npu,f"{data_path}/{test_case_name}/out/dq_npu.pt")
             torch.save(dk_npu,f"{data_path}/{test_case_name}/out/dk_npu.pt")
             torch.save(dw_npu,f"{data_path}/{test_case_name}/out/dw_npu.pt")
             torch.save(dg_npu,f"{data_path}/{test_case_name}/out/dg_npu.pt")
-            print(f"files saved to {data_path}/{test_case_name}/out/ .")
+            print(f"npu files saved to {data_path}/{test_case_name}/out/ .")

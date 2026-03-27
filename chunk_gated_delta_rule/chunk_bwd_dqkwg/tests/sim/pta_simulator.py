@@ -426,7 +426,7 @@ def chunk_bwd_dqkwg_cpu(
 # -------------------------------------------------------------------------
 if __name__ == "__main__":
     RANDOM_DATA = True
-    case_number = 21
+    case_number = 22
     if len(sys.argv) > 1:
         regen = sys.argv[1]
         if regen == "random":
@@ -459,7 +459,7 @@ if __name__ == "__main__":
         [1,8,65536,64,torch.bfloat16,torch.bfloat16,0.0625,torch.tensor([0,16,20000,65536])],
         [1,32,65536,64,torch.float16,torch.float32,0.0442,torch.tensor([0,16,20000,50000,65536])],
         [1,32,262144,64,torch.bfloat16,torch.bfloat16,0.03125,torch.tensor([0,16,20000,50000,65536,210000,262144])],
-        [2,4,2048,64,torch.bfloat16,torch.float32,0.088,None],  #21 [0,16,128] [0,16,135,512]
+        [2,4,1024,64,torch.bfloat16,torch.float32,0.088,None],  #21 [0,16,128] [0,16,135,512]
         [1,32,16384,64,torch.bfloat16,torch.float32,0.088,None],  #21 [0,16,128]
     ]
     device_id = 5
